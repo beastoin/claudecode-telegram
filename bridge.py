@@ -937,33 +937,6 @@ def _get_header(headers: list[GmailHeader], name: str) -> str:
     return ""
 
 
-def _safe_json_loads_list(raw: str) -> list[GithubComment]:
-    raw = raw.strip()
-    if not raw:
-        return []
-    raw_items: list[object] = []
-    try:
-        result: object = json.loads(raw)
-        if isinstance(result, list):
-            raw_items = result
-        else:
-            return []  # unexpected type
-    except json.JSONDecodeError:
-        for chunk in re.split(r"\]\s*\[", raw):
-            chunk = chunk.strip()
-            if not chunk.startswith("["):
-                chunk = "[" + chunk
-            if not chunk.endswith("]"):
-                chunk = chunk + "]"
-            try:
-                parsed: object = json.loads(chunk)
-                if isinstance(parsed, list):
-                    raw_items.extend(parsed)
-            except json.JSONDecodeError:
-                continue
-    return [cast(GithubComment, item) for item in raw_items if isinstance(item, dict)]
-
-
 class GmailConnector(BaseConnector[GmailMessage]):
     connector_name: str = "gmail"
 
@@ -1522,6 +1495,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
         on_alert: AlertCallback | None = None,
         state_file: str = "",
         gh_bin: str = "",
+        beast_bin: str = "",
     ) -> None:
         super().__init__(
             sender_filter=from_user,
@@ -1531,6 +1505,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
             on_alert=on_alert,
         )
         self.gh_bin: str = gh_bin or "gh"
+        self.beast_bin: str = beast_bin or "beast"
         repos = [repo] if isinstance(repo, str) else list(repo)
         if not repos:
             raise ValueError("github: at least one repo required")
@@ -1546,15 +1521,32 @@ class GitHubConnector(BaseConnector[GithubComment]):
         for repo in self.repos:
             try:
                 result = subprocess.run(
-                    [self.gh_bin, "api", f"/repos/{repo}", "--jq", ".id"],
+                    [
+                        self.beast_bin,
+                        "github",
+                        "comments",
+                        "--since",
+                        "1m",
+                        "-n",
+                        "1",
+                        "--json",
+                        "--fresh",
+                        "--repo",
+                        repo,
+                    ],
                     capture_output=True,
                     text=True,
-                    timeout=10,
+                    timeout=30,
                 )
                 if result.returncode != 0:
-                    return False, f"gh api failed for {repo}: {result.stderr.strip()}"
+                    return False, f"beast github failed for {repo}: {result.stderr.strip()}"
+                parsed: object = json.loads(result.stdout.strip() or "[]")
+                if not isinstance(parsed, list):
+                    return False, f"beast github unexpected output for {repo}: expected array"
+            except json.JSONDecodeError as e:
+                return False, f"beast github invalid JSON for {repo}: {e}"
             except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-                return False, f"gh preflight error for {repo}: {e}"
+                return False, f"beast github preflight error for {repo}: {e}"
         return True, "OK"
 
     def status(self) -> GithubStatus:
@@ -1638,58 +1630,77 @@ class GitHubConnector(BaseConnector[GithubComment]):
             f"Started (interval={self.poll_interval}s, repos={repos_str}, user={self.sender_filter}, since={poll_time})",
         )
 
-    def _gh_api(self, endpoint: str, timeout: int = 30) -> str | None:
+    def _beast_fetch(self, repo: str, since: str, timeout: int = 60) -> list[GithubComment] | None:
+        """Fetch comments for one repo via beast github CLI. Returns normalized comments or None on failure."""
         try:
             result = subprocess.run(
-                [self.gh_bin, "api", endpoint, "--paginate"],
+                [self.beast_bin, "github", "comments", "--since", since, "--json", "--repo", repo],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
             )
             if result.returncode != 0:
-                _log(_LOG_WARN, "github", f"gh api error: {result.stderr.strip()}")
+                _log(_LOG_WARN, "github", f"beast github error for {repo}: {result.stderr.strip()}")
                 return None
-            return result.stdout.strip()
+            raw = result.stdout.strip()
+            if not raw:
+                return []
+            parsed: object = json.loads(raw)
+            if not isinstance(parsed, list):
+                _log(_LOG_WARN, "github", f"beast github unexpected type for {repo}: {type(parsed).__name__}")
+                return None
+            return [self._normalize_beast_comment(c) for c in parsed if isinstance(c, dict)]
+        except json.JSONDecodeError as e:
+            _log(_LOG_WARN, "github", f"beast github invalid JSON for {repo}: {e}")
+            return None
         except subprocess.TimeoutExpired:
-            _log(_LOG_WARN, "github", f"gh api timed out: {endpoint}")
+            _log(_LOG_WARN, "github", f"beast github timed out for {repo}")
             return None
         except OSError as e:
-            _log(_LOG_WARN, "github", f"gh api exception: {e}")
+            _log(_LOG_WARN, "github", f"beast github exception for {repo}: {e}")
             return None
 
+    @staticmethod
+    def _normalize_beast_comment(c: dict) -> GithubComment:
+        """Convert beast CLI flat output to connector's internal GithubComment format."""
+        user_val = c.get("user", "")
+        if isinstance(user_val, str):
+            user_dict: GithubUser = {"login": user_val}
+        elif isinstance(user_val, dict):
+            user_dict = cast(GithubUser, user_val)
+        else:
+            user_dict = {"login": ""}
+        return cast(
+            GithubComment,
+            {
+                "id": c.get("id", 0),
+                "body": c.get("body", ""),
+                "user": user_dict,
+                "html_url": c.get("html_url", ""),
+                "issue_num": c.get("issue_num", ""),
+                "kind": c.get("kind", ""),
+            },
+        )
+
     def _get_all_comments(self, since: str) -> tuple[list[GithubComment] | None, bool]:
-        all_raws: list[str | None] = []
         any_success = False
         is_complete = True
-        for repo in self.repos:
-            issue_raw = self._gh_api(
-                f"/repos/{repo}/issues/comments?since={since}&sort=updated&direction=asc&per_page=100",
-            )
-            pr_raw = self._gh_api(
-                f"/repos/{repo}/pulls/comments?since={since}&sort=updated&direction=asc&per_page=100",
-            )
-            if issue_raw is not None or pr_raw is not None:
-                any_success = True
-            if issue_raw is None or pr_raw is None:
-                is_complete = False
-                failed = "issues" if issue_raw is None else "pulls"
-                _log(_LOG_WARN, "github", f"Partial fetch for {repo} — {failed} comments failed")
-            all_raws.extend([issue_raw, pr_raw])
-        if not any_success:
-            return None, False
         seen: set[int] = set()
         merged: list[GithubComment] = []
-        for raw in all_raws:
-            if not raw:
-                continue
-            comments = _safe_json_loads_list(raw)
-            for c in comments:
-                if not isinstance(c, dict):
-                    continue
-                cid = c.get("id", 0)
-                if isinstance(cid, int) and not isinstance(cid, bool) and cid not in seen:
-                    seen.add(cid)
-                    merged.append(c)
+        for repo in self.repos:
+            comments = self._beast_fetch(repo, since)
+            if comments is not None:
+                any_success = True
+                for c in comments:
+                    cid = c.get("id", 0)
+                    if isinstance(cid, int) and not isinstance(cid, bool) and cid not in seen:
+                        seen.add(cid)
+                        merged.append(c)
+            else:
+                is_complete = False
+                _log(_LOG_WARN, "github", f"Fetch failed for {repo}")
+        if not any_success:
+            return None, False
         return merged, is_complete
 
     def extract_sender(self, comment: GithubComment) -> str:
@@ -5945,17 +5956,17 @@ def cmd_pilot(router: CommandRouter, name: str, chat_id: int) -> bool:
         session_names = [e.split("@")[0] for e in session_entries]
         # Parse port from the spawned URL
         pilot_port = urlparse(url).port or 10171
+        host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
         with _log_suppress(urllib.error.URLError, OSError, TimeoutError, level=_LOG_DEBUG, tag="notify:unknown"):
             payload = json.dumps({"slug": slug, "sessions": session_names, "ttl": 1800}).encode()
             req = urllib.request.Request(
-                f"http://localhost:{pilot_port}/api/grid-session?token={_token}",
+                f"http://{host}:{pilot_port}/api/grid-session?token={_token}",
                 data=payload,
                 method="POST",
                 headers={"Content-Type": "application/json"},
             )
             with core._urlopen(req, timeout=TIMEOUT_TMUX_SEND) as resp:
                 cast(dict[str, object], json.loads(resp.read()))
-        host = urlparse(BRIDGE_PUBLIC_URL).hostname if BRIDGE_PUBLIC_URL else "localhost"
         pilot_url = f"http://{host}:{pilot_port}/grid/{_urlquote(slug)}?token={_token}"
     else:
         pilot_url = url

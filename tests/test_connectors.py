@@ -1286,6 +1286,70 @@ class TestGitHubMultiRepo:
         assert metadata.get("repo") == "beastoin/agent-swift"
 
 
+class TestGitHubBeastNormalize:
+    """Test beast CLI output normalization to internal GithubComment format."""
+
+    def test_flat_user_normalized(self):
+        gc = make_github_connector()
+        beast_out = {"id": 42, "user": "beastoin", "body": "test", "html_url": "https://github.com/o/r/issues/1#c42", "issue_num": "1", "kind": "issue"}
+        result = gc._normalize_beast_comment(beast_out)
+        assert result["user"] == {"login": "beastoin"}
+        assert result["id"] == 42
+        assert result["issue_num"] == "1"
+        assert result["kind"] == "issue"
+
+    def test_nested_user_passthrough(self):
+        gc = make_github_connector()
+        beast_out = {"id": 42, "user": {"login": "beastoin"}, "body": "test", "html_url": ""}
+        result = gc._normalize_beast_comment(beast_out)
+        assert result["user"]["login"] == "beastoin"
+
+    def test_missing_user_safe(self):
+        gc = make_github_connector()
+        result = gc._normalize_beast_comment({"id": 1, "body": "x", "html_url": ""})
+        assert result["user"] == {"login": ""}
+
+    def test_beast_fetch_success(self):
+        gc = make_github_connector()
+        gc._last_poll_time = "2026-10-24T00:00:00Z"
+        beast_json = '[{"id":1,"user":"alice","body":"hi","html_url":"https://github.com/o/r/issues/1#c1","issue_num":"1","kind":"issue"}]'
+        mock_result = MagicMock(returncode=0, stdout=beast_json, stderr="")
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = gc._beast_fetch("BasedHardware/omi", "2026-10-24T00:00:00Z")
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["user"] == {"login": "alice"}
+        assert result[0]["id"] == 1
+        call_args = mock_run.call_args[0][0]
+        assert "beast" in call_args[0]
+        assert "--since" in call_args
+
+    def test_beast_fetch_failure(self):
+        gc = make_github_connector()
+        mock_result = MagicMock(returncode=1, stdout="", stderr="error")
+        with patch("subprocess.run", return_value=mock_result):
+            result = gc._beast_fetch("BasedHardware/omi", "2026-10-24T00:00:00Z")
+        assert result is None
+
+    def test_beast_fetch_invalid_json(self):
+        gc = make_github_connector()
+        mock_result = MagicMock(returncode=0, stdout="not json", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = gc._beast_fetch("BasedHardware/omi", "2026-10-24T00:00:00Z")
+        assert result is None
+
+    def test_beast_preflight_uses_beast_cli(self):
+        gc = make_github_connector()
+        mock_result = MagicMock(returncode=0, stdout="[]", stderr="")
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            ok, msg = gc.preflight_check()
+        assert ok
+        call_args = mock_run.call_args[0][0]
+        assert "beast" in call_args[0]
+        assert "github" in call_args
+        assert "comments" in call_args
+
+
 # ── connector_on_message bridge callback ──────────────────────────────
 
 class TestConnectorOnMessageTelegramDelivery:
