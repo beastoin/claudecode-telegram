@@ -148,6 +148,7 @@ from shared import (
     _int_field,
     _log,
     _log_best_effort,
+    _log_event,
     _log_suppress,
     _node_name,
     _RealClock,
@@ -1149,6 +1150,7 @@ def _scan_latest_session_id(cwd: str, host: str | None = None) -> str:
 def _log_session_event(name: str, session_id: str, cwd: str, event: str) -> None:
     if not session_id:
         return
+    _log_event("session", event, worker=name, session_id=session_id, cwd=cwd or "")
     try:
         session_dir = ensure_session_dir(name)
         history_file = session_dir / "session_history.jsonl"

@@ -804,16 +804,20 @@ class TestCmdStatus:
 def test_alert_log_append_writes_jsonl(tmp_path):
     import json
     import bridge
+    import shared
     orig_node = bridge.NODE_DIR
+    orig_fh = shared._log_fh
+    shared._log_fh = None
     bridge.NODE_DIR = tmp_path
     try:
         eid = bridge._alert_log_append("fire", "gmail", desc="token expired")
         assert len(eid) == 16
-        log_file = tmp_path / "alert_log.jsonl"
+        log_file = tmp_path / "bridge.log"
         assert log_file.exists()
-        with open(log_file) as f:
-            line = f.readline()
-        entry = json.loads(line)
+        entries = [json.loads(l) for l in log_file.read_text().strip().split("\n")]
+        alert_entries = [e for e in entries if e.get("category") == "alert"]
+        assert len(alert_entries) == 1
+        entry = alert_entries[0]
         assert entry["id"] == eid
         assert entry["event"] == "fire"
         assert entry["key"] == "gmail"
@@ -821,24 +825,34 @@ def test_alert_log_append_writes_jsonl(tmp_path):
         assert "ts" in entry
     finally:
         bridge.NODE_DIR = orig_node
+        if shared._log_fh:
+            shared._log_fh.close()
+        shared._log_fh = orig_fh
 
 
 def test_alert_log_multiple_appends(tmp_path):
     import json
     import bridge
+    import shared
     orig_node = bridge.NODE_DIR
+    orig_fh = shared._log_fh
+    shared._log_fh = None
     bridge.NODE_DIR = tmp_path
     try:
         bridge._alert_log_append("fire", "poll", desc="timeout")
         bridge._alert_log_append("resolve", "poll", duration_s=120)
         bridge._alert_log_append("fire", "gmail", desc="expired")
-        log_file = tmp_path / "alert_log.jsonl"
-        lines = log_file.read_text().strip().split("\n")
-        assert len(lines) == 3
-        events = [json.loads(l)["event"] for l in lines]
+        log_file = tmp_path / "bridge.log"
+        all_entries = [json.loads(l) for l in log_file.read_text().strip().split("\n")]
+        alert_entries = [e for e in all_entries if e.get("category") == "alert"]
+        assert len(alert_entries) == 3
+        events = [e["event"] for e in alert_entries]
         assert events == ["fire", "resolve", "fire"]
     finally:
         bridge.NODE_DIR = orig_node
+        if shared._log_fh:
+            shared._log_fh.close()
+        shared._log_fh = orig_fh
 
 
 def test_alerts_active_save_and_load(tmp_path):
@@ -883,8 +897,11 @@ def test_health_alert_check_logs_fire_and_resolve(tmp_path):
     import json
     import time
     import bridge
+    import shared
     from unittest.mock import patch
     orig_node = bridge.NODE_DIR
+    orig_fh = shared._log_fh
+    shared._log_fh = None
     bridge.NODE_DIR = tmp_path
     with bridge._alert_lock:
         orig_active = dict(bridge._alert_active)
@@ -906,20 +923,20 @@ def test_health_alert_check_logs_fire_and_resolve(tmp_path):
         with patch.object(bridge.health, "snapshot", return_value=bad_snap), \
              patch("bridge._send_health_alert"):
             bridge._health_alert_check()
-        log_file = tmp_path / "alert_log.jsonl"
+        log_file = tmp_path / "bridge.log"
         assert log_file.exists()
-        lines = log_file.read_text().strip().split("\n")
-        assert len(lines) >= 1
-        entry = json.loads(lines[0])
-        assert entry["event"] == "fire"
-        assert entry["key"] == "gmail"
+        all_entries = [json.loads(l) for l in log_file.read_text().strip().split("\n")]
+        alert_entries = [e for e in all_entries if e.get("category") == "alert"]
+        assert len(alert_entries) >= 1
+        assert alert_entries[0]["event"] == "fire"
+        assert alert_entries[0]["key"] == "gmail"
 
         good_snap = {"signals": {"gmail": {"ok": True, "last_ok_ago_s": 1, "errors": 0}}, "threads": {}, "pools": {}}
         with patch.object(bridge.health, "snapshot", return_value=good_snap), \
              patch("bridge._send_health_alert"):
             bridge._health_alert_check()
-        lines = log_file.read_text().strip().split("\n")
-        resolve_events = [json.loads(l) for l in lines if json.loads(l)["event"] == "resolve"]
+        all_entries = [json.loads(l) for l in log_file.read_text().strip().split("\n")]
+        resolve_events = [e for e in all_entries if e.get("category") == "alert" and e["event"] == "resolve"]
         assert len(resolve_events) >= 1
         assert resolve_events[0]["key"] == "gmail"
     finally:
@@ -933,3 +950,6 @@ def test_health_alert_check_logs_fire_and_resolve(tmp_path):
         bridge.ALERT_WORKERS[:] = orig_workers
         bridge._health_channel_id = orig_hcid
         bridge.NODE_DIR = orig_node
+        if shared._log_fh:
+            shared._log_fh.close()
+        shared._log_fh = orig_fh

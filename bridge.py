@@ -98,6 +98,7 @@ from shared import (
     _GuestSessionDictRequired,
     _int_field,
     _log,
+    _log_event,
     _log_suppress,
     _MentionSnapshot,
     _node_name,
@@ -8590,31 +8591,34 @@ def cmd_alert(router: object, arg: str, chat_id: ChatId) -> bool:
                 count = min(int(parts[1]), 100)
         lines: list[str] = []
         try:
-            path = _alert_log_path()
-            if path.exists():
-                with open(path) as fh:
-                    all_lines = fh.readlines()
-                recent = all_lines[-count:]
-                lines.append(f"Last {len(recent)} of {len(all_lines)} alert events:")
-                for raw in recent:
-                    try:
-                        e = json.loads(raw)
-                        ts = e.get("ts", "?")
-                        ev = e.get("event", "?")
-                        key = e.get("key", "?")
-                        desc = e.get("desc", e.get("state", ""))
-                        eid = e.get("id", "?")[:8]
-                        line = f"  [{ts}] {ev} {key}"
-                        if desc:
-                            line += f" — {desc[:80]}"
-                        line += f" (id:{eid})"
-                        lines.append(line)
-                    except json.JSONDecodeError:
-                        continue
+            log_path = NODE_DIR / "bridge.log"
+            if log_path.exists():
+                alert_events: list[dict[str, object]] = []
+                with open(log_path) as fh:
+                    for raw in fh:
+                        try:
+                            e = json.loads(raw)
+                            if e.get("category") == "alert":
+                                alert_events.append(e)
+                        except json.JSONDecodeError:
+                            continue
+                recent = alert_events[-count:]
+                lines.append(f"Last {len(recent)} of {len(alert_events)} alert events:")
+                for e in recent:
+                    ts = e.get("ts", "?")
+                    ev = e.get("event", "?")
+                    key = e.get("key", "?")
+                    desc = e.get("desc", e.get("state", ""))
+                    eid = str(e.get("id", "?"))[:8]
+                    line = f"  [{ts}] {ev} {key}"
+                    if desc:
+                        line += f" — {str(desc)[:80]}"
+                    line += f" (id:{eid})"
+                    lines.append(line)
             else:
-                lines.append("No alert log yet.")
+                lines.append("No bridge log yet.")
         except OSError as exc:
-            lines.append(f"Error reading alert log: {exc}")
+            lines.append(f"Error reading bridge log: {exc}")
         router.reply(chat_id, "\n".join(lines))  # type: ignore[attr-defined]
         return True
     if sub == "show":
@@ -8623,7 +8627,8 @@ def cmd_alert(router: object, arg: str, chat_id: ChatId) -> bool:
             router.reply(chat_id, "Usage: /alert show <id>")  # type: ignore[attr-defined]
             return True
         try:
-            with open(_alert_log_path()) as fh:
+            log_path = NODE_DIR / "bridge.log"
+            with open(log_path) as fh:
                 for raw in fh:
                     try:
                         e = json.loads(raw)
@@ -9747,7 +9752,7 @@ def _setup_endpoint_routes() -> None:
                 "status": _alert_status(),
                 "active": dict(_alert_active),
                 "snoozed": {k: v - time.time() for k, v in _alert_snoozed.items() if v > time.time()},
-                "log_file": str(_alert_log_path()),
+                "log_file": str(NODE_DIR / "bridge.log"),
                 "active_file": str(_alerts_active_path()),
             },
         ),
@@ -9907,12 +9912,8 @@ _alert_lock = threading.Lock()
 _health_channel_id: str | None = None  # set during startup
 
 # --- JSONL alert persistence ---
-# alert_log.jsonl: append-only event log (fire, escalate, resolve, snooze)
+# Alert events go to unified bridge.log JSONL (category="alert")
 # alerts_active.jsonl: current unresolved alerts (atomically rewritten)
-
-
-def _alert_log_path() -> Path:
-    return NODE_DIR / "alert_log.jsonl"
 
 
 def _alerts_active_path() -> Path:
@@ -9920,21 +9921,8 @@ def _alerts_active_path() -> Path:
 
 
 def _alert_log_append(event: str, key: str, **extra: object) -> str:
-    """Append an event to alert_log.jsonl. Returns the event ID."""
-    eid = secrets.token_hex(8)
-    entry = {
-        "id": eid,
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "event": event,
-        "key": key,
-        **{k: v for k, v in extra.items() if v},
-    }
-    try:
-        with open(_alert_log_path(), "a") as fh:
-            fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
-    except OSError as exc:
-        _log(_LOG_DEBUG, "alert-log", f"append failed: {exc}")
-    return eid
+    """Log an alert event to unified bridge.log JSONL. Returns the event ID."""
+    return _log_event("alert", event, key=key, **extra)
 
 
 def _alerts_active_save() -> None:

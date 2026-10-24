@@ -3,8 +3,10 @@ from __future__ import annotations
 import enum
 import http.client
 import http.cookiejar
+import json as _json_log
 import os
 import re
+import secrets as _secrets_mod
 import subprocess
 import sys
 import threading
@@ -16,7 +18,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, NamedTuple, Protocol, TypedDict
+from typing import IO, Literal, NamedTuple, Protocol, TypedDict
 from urllib.parse import urlparse
 
 # --- Types ---
@@ -690,14 +692,97 @@ _LOG_DEBUG: str = "DEBUG"
 _LOG_LEVELS: dict[str, int] = {"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3}
 _LOG_MIN_LEVEL: int = _LOG_LEVELS.get(os.environ.get("BRIDGE_LOG_LEVEL", "INFO").upper(), 2)
 
+_LOG_MAX_BYTES: int = int(os.environ.get("BRIDGE_LOG_MAX_BYTES", str(10 * 1024 * 1024)))  # 10MB
+_LOG_BACKUP_COUNT: int = 3
+_log_lock = threading.Lock()
+_log_fh: IO[str] | None = None
+
+
+def _log_open() -> None:
+    """Open (or reopen) the JSONL log file. Called lazily on first write."""
+    global _log_fh
+    try:
+        _log_fh = open(NODE_DIR / "bridge.log", "a")  # noqa: SIM115
+    except OSError:
+        _log_fh = None
+
+
+def _log_rotate() -> None:
+    """Rotate bridge.log when it exceeds _LOG_MAX_BYTES."""
+    global _log_fh
+    log_path = NODE_DIR / "bridge.log"
+    try:
+        if not log_path.exists():
+            return
+        if log_path.stat().st_size < _LOG_MAX_BYTES:
+            return
+        if _log_fh:
+            _log_fh.close()
+            _log_fh = None
+        for i in range(_LOG_BACKUP_COUNT - 1, 0, -1):
+            src = log_path.with_suffix(f".log.{i}")
+            dst = log_path.with_suffix(f".log.{i + 1}")
+            if src.exists():
+                src.rename(dst)
+        log_path.rename(log_path.with_suffix(".log.1"))
+        _log_open()
+    except OSError:
+        pass
+
 
 def _log(level: str, component: str, msg: str | Path, *, exc: BaseException | None = None) -> None:
     if _LOG_LEVELS.get(level, 2) > _LOG_MIN_LEVEL:
         return
-    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     print(f"[{ts} {level}:{component}] {msg}", file=sys.stderr, flush=True)
     if exc is not None:
         _tb.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+    entry = {"ts": ts, "level": level, "component": component, "msg": str(msg)[:2000]}
+    if exc is not None:
+        entry["exc"] = f"{type(exc).__name__}: {exc}"[:500]
+    with _log_lock:
+        global _log_fh
+        if _log_fh is None:
+            _log_open()
+        if _log_fh is not None:
+            try:
+                _log_fh.write(_json_log.dumps(entry, separators=(",", ":")) + "\n")
+                _log_fh.flush()
+                _log_rotate()
+            except OSError:
+                _log_fh = None
+
+
+def _log_event(category: str, event: str, **fields: object) -> str:
+    """Write a structured event to bridge.log JSONL. Returns the event ID."""
+    eid = _secrets_mod.token_hex(8)
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    entry: dict[str, object] = {
+        "ts": ts,
+        "level": "EVENT",
+        "category": category,
+        "event": event,
+        "id": eid,
+    }
+    entry.update({k: v for k, v in fields.items() if v is not None and v != ""})
+    line = _json_log.dumps(entry, separators=(",", ":")) + "\n"
+    print(
+        f"[{ts} EVENT:{category}] {event} {' '.join(f'{k}={v}' for k, v in fields.items() if v)}",
+        file=sys.stderr,
+        flush=True,
+    )
+    with _log_lock:
+        global _log_fh
+        if _log_fh is None:
+            _log_open()
+        if _log_fh is not None:
+            try:
+                _log_fh.write(line)
+                _log_fh.flush()
+                _log_rotate()
+            except OSError:
+                _log_fh = None
+    return eid
 
 
 def _log_best_effort(label: str, func: Callable[..., object], *args: object, **kwargs: object) -> object | None:  # type: ignore[explicit-any]
