@@ -2,12 +2,14 @@
 
 These tests create REAL tmux sessions, send REAL messages,
 probe with the REAL TmuxProvider, and verify actual lifecycle behavior.
-No mocks — the full send→observe→diagnose→stop flow runs against real tmux.
+Full flow against real tmux. Codex adapter threads are blocked from
+reaching the prod bridge (they'd POST to BRIDGE_URL/outputs → Telegram).
 """
 import os
 import subprocess
 import time
 import uuid
+from unittest.mock import patch
 
 import pytest
 
@@ -130,7 +132,9 @@ class TestClaudeSessionE2E:
 class TestCodexSessionE2E:
     """Codex session: send dispatches async, tmux stays alive."""
 
-    def test_send_returns_queued_for_real_session(self, tmux_session):
+    @patch("claudecode._codex_adapter_remote")
+    @patch("claudecode._codex_adapter_thread")
+    def test_send_returns_queued_for_real_session(self, _mock_thread, _mock_remote, tmux_session):
         session = TmuxCodexSession("e2e-codex", tmux_session)
         receipt = session.send("test query")
         assert receipt.outcome == SendOutcome.QUEUED
@@ -238,8 +242,10 @@ class TestFullLifecycleE2E:
             session = create_session("codex-life", tmux_name, "codex")
             assert session.is_interactive is False
 
-            receipt = session.send("test codex query")
-            assert receipt.outcome == SendOutcome.QUEUED
+            with patch("claudecode._codex_adapter_thread"), \
+                 patch("claudecode._codex_adapter_remote"):
+                receipt = session.send("test codex query")
+                assert receipt.outcome == SendOutcome.QUEUED
 
             provider = TmuxProvider()
             results = provider.probe_many([session])
