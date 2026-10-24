@@ -118,6 +118,8 @@ from shared import (
     MachineHealthDict,
     MarkdownToken,
     MemUsageDict,
+    OutputBinding,
+    ProbeOutcome,
     ProcStatsEntry,
     QuestionDetails,
     QuestionOption,
@@ -125,6 +127,12 @@ from shared import (
     RegistryWorkerDict,
     ReminderState,
     ResourceAlertConfig,
+    RuntimeActivity,
+    RuntimeDiagnostics,
+    RuntimeObservation,
+    RuntimePresence,
+    SendOutcome,
+    SendReceipt,
     SubprocessRunner,
     TmuxActivityResult,
     TmuxSessionDict,
@@ -154,6 +162,8 @@ from shared import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from bridge import Machine
 
 
@@ -247,6 +257,35 @@ class Backend(Protocol):
     def start_cmd(self, resume_id: str = "") -> str: ...
     def send(self, worker_name: str, tmux_name: str, text: str, bridge_url: str, sessions_dir: Path) -> bool: ...
     def is_online(self, tmux_name: str) -> bool: ...
+
+
+class RuntimeSession(Protocol):
+    @property
+    def worker_name(self) -> str: ...
+    @property
+    def tmux_name(self) -> str: ...
+    @property
+    def backend_name(self) -> str: ...
+    @property
+    def is_interactive(self) -> bool: ...
+    @property
+    def host(self) -> str | None: ...
+
+    def start_cmd(self, resume_id: str = "") -> str: ...
+    def stop(self) -> bool: ...
+    def send(self, text: str) -> SendReceipt: ...
+    def snapshot(self) -> RuntimeObservation: ...
+    def diagnose(self, lines: int = 50) -> RuntimeDiagnostics: ...
+    def bind_output(self, binding: OutputBinding) -> None: ...
+
+
+class RuntimeProvider(Protocol):
+    def probe_many(
+        self, sessions: Sequence[RuntimeSession], *, deadline: float = 4.0
+    ) -> dict[str, RuntimeObservation]: ...
+    def discover_sessions(self, host: str | None = None) -> dict[str, str]: ...
+
+
 class RemoteCache:
     def __init__(self) -> None:
         self.lock: threading.Lock = threading.Lock()
@@ -710,6 +749,204 @@ class CodexBackend:
 
     def is_online(self, tmux_name: str) -> bool:
         return tmux_exists(tmux_name)
+
+
+class TmuxClaudeSession:
+    def __init__(self, worker: str, tmux: str, host: str | None = None) -> None:
+        self._worker = worker
+        self._tmux = tmux
+        self._host = host
+        self._last_obs: RuntimeObservation | None = None
+
+    @property
+    def worker_name(self) -> str:
+        return self._worker
+
+    @property
+    def tmux_name(self) -> str:
+        return self._tmux
+
+    @property
+    def backend_name(self) -> str:
+        return "claude"
+
+    @property
+    def is_interactive(self) -> bool:
+        return True
+
+    @property
+    def host(self) -> str | None:
+        return self._host
+
+    def start_cmd(self, resume_id: str = "") -> str:
+        return build_claude_start_cmd(resume_id)
+
+    def stop(self) -> bool:
+        try:
+            r = _remote_run(["tmux", "kill-session", "-t", self._tmux], host=self._host, timeout=TIMEOUT_TMUX_SEND)
+            return r.returncode == 0
+        except (subprocess.SubprocessError, OSError):
+            return False
+
+    def send(self, text: str) -> SendReceipt:
+        try:
+            if not tmux_exists(self._tmux, host=self._host, timeout=TIMEOUT_TMUX_CHECK):
+                return SendReceipt(SendOutcome.REJECTED, "session absent")
+        except (subprocess.SubprocessError, OSError):
+            if not self._host:
+                return SendReceipt(SendOutcome.REJECTED, "session check failed")
+        literal = False
+        try:
+            r = _remote_run(
+                ["tmux", "capture-pane", "-t", self._tmux, "-p"],
+                host=self._host,
+                timeout=TIMEOUT_TMUX_SEND,
+            )
+            if r.returncode == 0 and "Paste code here" in r.stdout:
+                literal = True
+        except (subprocess.SubprocessError, OSError):
+            pass
+        ok = tmux_send_message(self._tmux, text, host=self._host, literal=literal)
+        return SendReceipt(SendOutcome.SUBMITTED if ok else SendOutcome.REJECTED)
+
+    def snapshot(self) -> RuntimeObservation:
+        if self._last_obs is not None:
+            return self._last_obs
+        return RuntimeObservation(RuntimePresence.UNKNOWN, RuntimeActivity.UNKNOWN, ProbeOutcome.ERROR, _clock.time())
+
+    def update_observation(self, obs: RuntimeObservation) -> None:
+        self._last_obs = obs
+
+    def diagnose(self, lines: int = 50) -> RuntimeDiagnostics:
+        pane_text = _capture_pane_text(self._tmux, lines=lines, host=self._host)
+        cmd = get_pane_command(self._tmux, host=self._host)
+        pid = ""
+        try:
+            r = _remote_run(
+                ["tmux", "display-message", "-t", self._tmux, "-p", "#{pane_pid}"],
+                host=self._host,
+                timeout=TIMEOUT_TMUX_CHECK,
+            )
+            if r.returncode == 0:
+                pid = r.stdout.strip()
+        except (subprocess.SubprocessError, OSError):
+            pass
+        return RuntimeDiagnostics(pane_text=pane_text, pane_pid=pid, process_name=cmd)
+
+    def bind_output(self, binding: OutputBinding) -> None:
+        export_hook_env(self._tmux, backend=binding.backend_name, host=self._host)
+
+
+class TmuxCodexSession:
+    def __init__(self, worker: str, tmux: str, host: str | None = None) -> None:
+        self._worker = worker
+        self._tmux = tmux
+        self._host = host
+        self._last_obs: RuntimeObservation | None = None
+
+    @property
+    def worker_name(self) -> str:
+        return self._worker
+
+    @property
+    def tmux_name(self) -> str:
+        return self._tmux
+
+    @property
+    def backend_name(self) -> str:
+        return "codex"
+
+    @property
+    def is_interactive(self) -> bool:
+        return False
+
+    @property
+    def host(self) -> str | None:
+        return self._host
+
+    def start_cmd(self, resume_id: str = "") -> str:
+        return "echo 'Codex worker ready (non-interactive)'"
+
+    def stop(self) -> bool:
+        try:
+            r = _remote_run(["tmux", "kill-session", "-t", self._tmux], host=self._host, timeout=TIMEOUT_TMUX_SEND)
+            return r.returncode == 0
+        except (subprocess.SubprocessError, OSError):
+            return False
+
+    def send(self, text: str) -> SendReceipt:
+        bridge_url = BRIDGE_URL
+        sessions_dir = SESSIONS_DIR
+        if self._host:
+            threading.Thread(
+                target=_codex_adapter_remote,
+                args=(self._worker, text, bridge_url, sessions_dir, self._host),
+                daemon=True,
+            ).start()
+        else:
+            threading.Thread(
+                target=_codex_adapter_thread,
+                args=(self._worker, text, bridge_url, sessions_dir),
+                daemon=True,
+            ).start()
+        return SendReceipt(SendOutcome.QUEUED, "codex exec dispatched")
+
+    def snapshot(self) -> RuntimeObservation:
+        if self._last_obs is not None:
+            return self._last_obs
+        return RuntimeObservation(RuntimePresence.UNKNOWN, RuntimeActivity.UNKNOWN, ProbeOutcome.ERROR, _clock.time())
+
+    def update_observation(self, obs: RuntimeObservation) -> None:
+        self._last_obs = obs
+
+    def diagnose(self, lines: int = 50) -> RuntimeDiagnostics:
+        pane_text = _capture_pane_text(self._tmux, lines=lines, host=self._host)
+        cmd = get_pane_command(self._tmux, host=self._host)
+        return RuntimeDiagnostics(pane_text=pane_text, process_name=cmd)
+
+    def bind_output(self, binding: OutputBinding) -> None:
+        export_hook_env(self._tmux, backend=binding.backend_name, host=self._host)
+
+
+class TmuxProvider:
+    def probe_many(self, sessions: Sequence[RuntimeSession], *, deadline: float = 4.0) -> dict[str, RuntimeObservation]:
+        now = _clock.time()
+        hosts: dict[str | None, list[RuntimeSession]] = {}
+        for s in sessions:
+            hosts.setdefault(s.host, []).append(s)
+        results: dict[str, RuntimeObservation] = {}
+        for host, host_sessions in hosts.items():
+            pane_pids = _tmux_pane_pids(host=host)
+            for s in host_sessions:
+                if s.tmux_name in pane_pids:
+                    pid = pane_pids[s.tmux_name]
+                    activity = RuntimeActivity.UNKNOWN
+                    if s.is_interactive:
+                        running = is_process_running(s.tmux_name, "claude", host=host)
+                        activity = RuntimeActivity.BUSY if running else RuntimeActivity.IDLE
+                    else:
+                        activity = RuntimeActivity.IDLE
+                    obs = RuntimeObservation(RuntimePresence.PRESENT, activity, ProbeOutcome.OK, now)
+                else:
+                    obs = RuntimeObservation(RuntimePresence.ABSENT, RuntimeActivity.UNKNOWN, ProbeOutcome.OK, now)
+                results[s.worker_name] = obs
+                if hasattr(s, "update_observation"):
+                    s.update_observation(obs)
+        return results
+
+    def discover_sessions(self, host: str | None = None) -> dict[str, str]:
+        return _tmux_pane_pids(host=host)
+
+
+def create_session(
+    worker_name: str, tmux_name: str, backend_name: str, host: str | None = None
+) -> TmuxClaudeSession | TmuxCodexSession:
+    if backend_name == "codex":
+        return TmuxCodexSession(worker_name, tmux_name, host)
+    return TmuxClaudeSession(worker_name, tmux_name, host)
+
+
+runtime_provider = TmuxProvider()
 
 
 def _find_codex_transcript(worker_name: str, host: str | None = None) -> str | None:

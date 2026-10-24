@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import http.client
 import http.cookiejar
 import os
@@ -13,7 +14,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, NamedTuple, Protocol, TypedDict
 from urllib.parse import urlparse
@@ -142,6 +143,68 @@ class GitPushStateResult(TypedDict, total=False):
     orig_branch: str
     staged_files: list[str]
     stash_sha: str | None
+
+
+# --- Runtime protocol types (SPEC-018) ---
+
+
+class RuntimePresence(enum.Enum):
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+class RuntimeActivity(enum.Enum):
+    IDLE = "idle"
+    BUSY = "busy"
+    WAITING_INPUT = "waiting_input"
+    UNKNOWN = "unknown"
+
+
+class ProbeOutcome(enum.Enum):
+    OK = "ok"
+    UNREACHABLE = "unreachable"
+    ERROR = "error"
+
+
+class SendOutcome(enum.Enum):
+    SUBMITTED = "submitted"
+    QUEUED = "queued"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class RuntimeObservation:
+    presence: RuntimePresence
+    activity: RuntimeActivity
+    probe: ProbeOutcome
+    timestamp: float
+    conversation_id: str = ""
+    cwd: str = ""
+
+
+@dataclass(frozen=True)
+class RuntimeDiagnostics:
+    pane_text: str = ""
+    pane_pid: str = ""
+    process_name: str = ""
+    resource_usage: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OutputBinding:
+    bridge_url: str
+    sessions_dir: str
+    port: int
+    tmux_prefix: str
+    backend_name: str
+
+
+@dataclass(frozen=True)
+class SendReceipt:
+    outcome: SendOutcome
+    detail: str = ""
 
 
 class TelegramApiResponseDict(TypedDict, total=False):
