@@ -3048,6 +3048,8 @@ def _watchdog_alert(category: str, text: str | None) -> None:
     ):
         transport.send_text(admin_chat_id, text)
         _log(_LOG_WARN, "watchdog", f"{category}: {text.splitlines()[0]}")
+    with _log_suppress(Exception, tag="watchdog", msg=f"{category} worker alert failed: "):
+        _send_health_alert(text)
 
 
 def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
