@@ -1430,3 +1430,60 @@ class TestConnectorOnMessageTelegramDelivery:
         finally:
             bridge.admin_chat_id = saved[0]
             shared.admin_chat_id = saved[1]
+
+
+# ── GitHub Preflight Resilience ──────────────────────────────────────
+
+class TestGitHubPreflightResilience:
+    """GitHub connector preflight skips failing repos instead of dying."""
+
+    def test_preflight_skips_failing_repo_keeps_good_ones(self):
+        gc = make_github_connector(repo=["BasedHardware/omi", "bad/repo", "beastoin/agent-swift"])
+        def side_effect(cmd, **kw):
+            repo = cmd[-1]
+            if repo == "bad/repo":
+                return MagicMock(returncode=1, stdout="", stderr="repo not in allowlist")
+            return MagicMock(returncode=0, stdout="[]", stderr="")
+        with patch("subprocess.run", side_effect=side_effect):
+            ok, msg = gc.preflight_check()
+        assert ok
+        assert "skipped" in msg
+        assert "bad/repo" in msg
+        assert gc.repos == ["BasedHardware/omi", "beastoin/agent-swift"]
+
+    def test_preflight_fails_when_all_repos_fail(self):
+        gc = make_github_connector(repo=["bad/one", "bad/two"])
+        mock_result = MagicMock(returncode=1, stdout="", stderr="not in allowlist")
+        with patch("subprocess.run", return_value=mock_result):
+            ok, msg = gc.preflight_check()
+        assert not ok
+        assert "all repos failed" in msg
+
+    def test_preflight_ok_when_all_repos_succeed(self):
+        gc = make_github_connector(repo=["BasedHardware/omi", "beastoin/agent-swift"])
+        mock_result = MagicMock(returncode=0, stdout="[]", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            ok, msg = gc.preflight_check()
+        assert ok
+        assert msg == "OK"
+        assert gc.repos == ["BasedHardware/omi", "beastoin/agent-swift"]
+
+
+# ── Connector Restart Thread Registration ────────────────────────────
+
+class TestConnectorRestartThreadRegistration:
+    """restart_connector re-registers the new thread with BridgeHealth."""
+
+    def test_restart_registers_thread_with_health(self):
+        from bridge import restart_connector, health, GMAIL_ENABLED, GmailConnector
+        with patch("bridge.GITHUB_ENABLED", True), \
+             patch("bridge.GitHubConnector") as mock_cls, \
+             patch("bridge.new_github") as mock_factory, \
+             patch("bridge.health") as mock_health:
+            mock_inst = MagicMock()
+            mock_inst.restart.return_value = (True, "OK")
+            mock_inst._thread = MagicMock()
+            mock_factory.return_value = mock_inst
+            ok, msg = restart_connector("github")
+            assert ok
+            mock_health.register_thread.assert_called_once_with("github-poller", mock_inst._thread)

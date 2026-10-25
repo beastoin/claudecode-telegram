@@ -1518,6 +1518,8 @@ class GitHubConnector(BaseConnector[GithubComment]):
         self._seen_ids: set[int] = set()
 
     def preflight_check(self) -> tuple[bool, str]:
+        ok_repos: list[str] = []
+        failed_repos: list[str] = []
         for repo in self.repos:
             try:
                 result = subprocess.run(
@@ -1539,14 +1541,26 @@ class GitHubConnector(BaseConnector[GithubComment]):
                     timeout=30,
                 )
                 if result.returncode != 0:
-                    return False, f"beast github failed for {repo}: {result.stderr.strip()}"
+                    _log(_LOG_WARN, "github", f"Preflight skip {repo}: {result.stderr.strip()}")
+                    failed_repos.append(repo)
+                    continue
                 parsed: object = json.loads(result.stdout.strip() or "[]")
                 if not isinstance(parsed, list):
-                    return False, f"beast github unexpected output for {repo}: expected array"
+                    _log(_LOG_WARN, "github", f"Preflight skip {repo}: unexpected output type")
+                    failed_repos.append(repo)
+                    continue
+                ok_repos.append(repo)
             except json.JSONDecodeError as e:
-                return False, f"beast github invalid JSON for {repo}: {e}"
+                _log(_LOG_WARN, "github", f"Preflight skip {repo}: invalid JSON: {e}")
+                failed_repos.append(repo)
             except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-                return False, f"beast github preflight error for {repo}: {e}"
+                _log(_LOG_WARN, "github", f"Preflight skip {repo}: {e}")
+                failed_repos.append(repo)
+        if not ok_repos:
+            return False, f"all repos failed preflight: {', '.join(failed_repos)}"
+        if failed_repos:
+            self.repos = ok_repos
+            return True, f"OK ({len(ok_repos)} repos; skipped: {', '.join(failed_repos)})"
         return True, "OK"
 
     def status(self) -> GithubStatus:
@@ -2060,6 +2074,8 @@ def restart_connector(name: str) -> tuple[bool, str]:
     inst = factory()
     setattr(connectors, name, inst)
     ok, msg = inst.restart()  # type: ignore[attr-defined]
+    if ok and inst._thread:  # type: ignore[attr-defined]
+        health.register_thread(f"{name}-poller", inst._thread)  # type: ignore[attr-defined]
     _log(_LOG_INFO, name, f"Connector {'restarted' if ok else 'restart failed'}: {msg}")
     return ok, msg
 
