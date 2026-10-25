@@ -5042,6 +5042,7 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
     rich_failed_at = -1
     rich_chunks: list[str] = []
     prev_msg_id: int | None = None
+    first_recorded = False
     if hasattr(transport, "send_rich_text"):
         rich_text = clean_text.lstrip()
         prefix_lower = f"{name}:".lower()
@@ -5060,6 +5061,9 @@ def _send_text_via_telegram(name: str, clean_text: str, chat_id: int, log_prefix
                 health.ok("telegram_api")
                 _rr = result.get("result", {})
                 prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
+                if prev_msg_id and not first_recorded:
+                    _record_message(prev_msg_id, clean_text, name)
+                    first_recorded = True
                 if len(rich_chunks) > 1:
                     _log(
                         _LOG_INFO,
@@ -5094,12 +5098,16 @@ def _send_as_html(name: str, text: str, chat_id: int, log_prefix: str, prev_msg_
     prefix_reserve = len(name) + 30
     chunks = split_message(html_text, TELEGRAM_MAX_LENGTH - prefix_reserve)
     formatted_parts = format_multipart_messages(name, chunks)
+    first_recorded = False
     for i, part in enumerate(formatted_parts):
         result = transport.send_text(chat_id, part, parse_mode="HTML", reply_to=prev_msg_id if prev_msg_id else None)
         if result and result.get("ok"):
             health.ok("telegram_api")
             _rr = result.get("result", {})
             prev_msg_id = _rr.get("message_id") if isinstance(_rr, dict) else None
+            if prev_msg_id and not first_recorded:
+                _record_message(prev_msg_id, text, name)
+                first_recorded = True
             if len(formatted_parts) > 1:
                 _log(
                     _LOG_INFO, "telegram", f"{log_prefix} sent: {name} part {i+1}/{len(formatted_parts)} -> Telegram OK"
@@ -9065,24 +9073,55 @@ class CommandRouter:
             return {"name": name, "status": "sent"}
         return {"name": name, "status": "unknown"}
 
+    @staticmethod
+    def _sender_from_msg(msg: TelegramMessageDict) -> str:
+        """Identify sender: worker name from 'name:' prefix, or 'manager'."""
+        text = _extract_msg_text(msg)
+        if cast(dict[str, object], msg.get("from") or {}).get("is_bot"):
+            first_line = text.split("\n", 1)[0] if text else ""
+            if first_line.endswith((":", ":**")) or ": " in first_line:
+                candidate = first_line.split(":")[0].strip().strip("*").lower()
+                if candidate and len(candidate) < 20:
+                    return candidate
+            return "worker"
+        return "manager"
+
     def get_reply_context(self, reply_msg: TelegramMessageDict) -> tuple[str, int | None]:
         if not reply_msg:
             return "", None
+        reply_msg_id = reply_msg.get("message_id")
+        if reply_msg_id:
+            chain = _walk_reply_chain(reply_msg_id)
+            if chain:
+                return self._format_chain(chain), cast(int | None, chain[0].get("ts"))
         text = _extract_msg_text(reply_msg)
         ts = reply_msg.get("date")
         return text, ts
 
-    def format_reply_context(self, reply_text: str, context_text: str, context_ts: int | None = None) -> str:
-        reply_text = (reply_text or "").strip()
+    @staticmethod
+    def _ts_iso(ts: int | None) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else "?"
+
+    @staticmethod
+    def _format_chain(chain: list[dict[str, object]]) -> str:
+        parts: list[str] = []
+        for entry in chain:
+            ts_str = CommandRouter._ts_iso(cast(int | None, entry.get("ts")))
+            text = str(entry.get("text", ""))
+            parts.append(f'<message ts="{ts_str}">\n{text}\n</message>')
+        return "\n".join(parts)
+
+    def format_reply_context(self, new_text: str, context_text: str, context_ts: int | None = None) -> str:
+        new_text = (new_text or "").strip()
         context_text = (context_text or "").strip()
-        if context_text:
-            ts_str = ""
-            if context_ts:
-                ts_str = f" at {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(context_ts))}"
-            return (
-                "Manager reply:\n" f"{reply_text}\n\n" f"Context (your previous message{ts_str}):\n" f"{context_text}"
-            )
-        return f"Manager reply:\n{reply_text}"
+        if not context_text:
+            return new_text
+        if "<message " in context_text:
+            history = context_text
+        else:
+            ctx_str = CommandRouter._ts_iso(context_ts)
+            history = f'<message ts="{ctx_str}">\n{context_text}\n</message>'
+        return f"<reply_thread>\n{history}\n</reply_thread>\n\n{new_text}"
 
     def __init__(self, transport: MessageTransport | None, workers: WorkerManager) -> None:
         if transport is not None and not isinstance(transport, MessageTransport):
@@ -9269,6 +9308,18 @@ class CommandRouter:
             _log(_LOG_WARN, "bridge", f"Rejected non-admin: {chat_id}")
             return
         save_last_chat_id(chat_id)
+        reply_to = msg.get("reply_to_message")
+        reply_to_msg_id = reply_to.get("message_id") if reply_to else None
+        if reply_to and reply_to_msg_id:
+            _record_message(
+                reply_to_msg_id,
+                _extract_msg_text(reply_to),
+                self._sender_from_msg(reply_to),
+                reply_to.get("date"),
+                (reply_to.get("reply_to_message") or {}).get("message_id"),
+            )
+        if msg_id:
+            _record_message(msg_id, text, "manager", msg.get("date"), reply_to_msg_id)
         if text.startswith("/") and self.handle_command(text, chat_id, msg_id):
             _last_mention.target = None
             _last_mention.count = 0
@@ -9279,7 +9330,6 @@ class CommandRouter:
             return
         reply_context = ""
         reply_context_ts = None
-        reply_to = msg.get("reply_to_message")
         if reply_to:
             reply_context, reply_context_ts = self.get_reply_context(reply_to)
         unknown_mentions = self.unknown_at_mentions(text)
@@ -10292,6 +10342,51 @@ _message_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="msg")
 _task_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="task")
 
 # ── Hook response debounce ──────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Message history — bounded ring of recent Telegram messages (in+out) keyed
+# by message_id.  Used to reconstruct full reply chains.
+# ---------------------------------------------------------------------------
+_MSG_HISTORY_MAX = 500
+_msg_history_lock = threading.Lock()
+_msg_history: dict[int, dict[str, object]] = {}  # msg_id -> {text, sender, ts, reply_to_msg_id}
+_msg_history_order: list[int] = []
+
+
+def _record_message(
+    msg_id: int, text: str, sender: str, ts: int | None = None, reply_to_msg_id: int | None = None
+) -> None:
+    if not msg_id:
+        return
+    with _msg_history_lock:
+        if msg_id not in _msg_history:
+            _msg_history_order.append(msg_id)
+        _msg_history[msg_id] = {
+            "text": text,
+            "sender": sender,
+            "ts": ts or int(_clock.time()),
+            "reply_to_msg_id": reply_to_msg_id,
+        }
+        while len(_msg_history_order) > _MSG_HISTORY_MAX:
+            old_id = _msg_history_order.pop(0)
+            _msg_history.pop(old_id, None)
+
+
+def _walk_reply_chain(msg_id: int, max_depth: int = 20) -> list[dict[str, object]]:
+    chain: list[dict[str, object]] = []
+    seen: set[int] = set()
+    current_id: int | None = msg_id
+    with _msg_history_lock:
+        while current_id and current_id not in seen and len(chain) < max_depth:
+            seen.add(current_id)
+            entry = _msg_history.get(current_id)
+            if not entry:
+                break
+            chain.append({"msg_id": current_id, **entry})
+            current_id = cast(int | None, entry.get("reply_to_msg_id"))
+    chain.reverse()
+    return chain
+
+
 # Claude Code fires Stop for every assistant turn, including intermediate
 # turns between tool calls.  Without debounce a single task can send 2-3
 # messages to Telegram.  We buffer the last response per worker and flush

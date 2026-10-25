@@ -199,10 +199,13 @@ def test_format_reply_context_with_timestamp():
 
     b = bridge.CommandRouter.__new__(bridge.CommandRouter)
     result = b.format_reply_context('do this', 'I did that', 1719403200)
-    assert 'at 2024-06-26 12:00 UTC' in result, f'Expected timestamp in result, got {result!r}'
-    assert 'Manager reply:' in result
-    assert 'do this' in result
+    assert '<reply_thread>' in result
+    assert '</reply_thread>' in result
+    assert 'ts="2024-06-26T12:00:00Z"' in result
     assert 'I did that' in result
+    # New message is OUTSIDE the thread block
+    assert result.endswith('do this')
+    assert '</reply_thread>\n\ndo this' in result
 
 
 def test_format_reply_context_without_timestamp():
@@ -210,8 +213,107 @@ def test_format_reply_context_without_timestamp():
 
     b = bridge.CommandRouter.__new__(bridge.CommandRouter)
     result = b.format_reply_context('do this', 'I did that')
-    assert 'at ' not in result, f'Unexpected timestamp in result: {result!r}'
-    assert 'Context (your previous message):' in result
+    assert '<reply_thread>' in result
+    assert 'I did that' in result
+    assert result.endswith('do this')
+
+
+def test_format_reply_context_chain():
+    """Chain context (already XML) wraps; new message outside."""
+    import bridge
+
+    b = bridge.CommandRouter.__new__(bridge.CommandRouter)
+    chain = '<message ts="2026-10-25T12:00:00Z">\nlee: deploy done\n</message>\n<message ts="2026-10-25T12:01:00Z">\nmanager: check logs\n</message>'
+    result = b.format_reply_context('actually wait', chain)
+    assert '<reply_thread>' in result
+    assert 'lee: deploy done' in result
+    assert 'manager: check logs' in result
+    assert result.endswith('actually wait')
+    assert '</reply_thread>\n\nactually wait' in result
+
+
+def test_format_reply_context_no_context():
+    import bridge
+
+    b = bridge.CommandRouter.__new__(bridge.CommandRouter)
+    result = b.format_reply_context('just text', '')
+    assert result == 'just text'
+
+
+def test_format_reply_context_multiline():
+    """Multi-line messages preserved."""
+    import bridge
+
+    b = bridge.CommandRouter.__new__(bridge.CommandRouter)
+    result = b.format_reply_context('line one\nline two', 'ctx line', 1719403200)
+    assert 'line one\nline two' in result
+    assert 'ctx line' in result
+
+
+def test_format_reply_new_message_outside_thread():
+    """New message is outside reply_thread, not inside."""
+    import bridge
+
+    b = bridge.CommandRouter.__new__(bridge.CommandRouter)
+    result = b.format_reply_context('do this', 'context', 1719403200)
+    thread_end = result.index('</reply_thread>')
+    new_msg_start = result.index('do this')
+    assert new_msg_start > thread_end
+
+
+def test_message_history_record_and_walk():
+    import bridge
+
+    bridge._msg_history.clear()
+    bridge._msg_history_order.clear()
+    bridge._record_message(100, "deploy done", "lee", 1000, None)
+    bridge._record_message(101, "nice, check logs", "manager", 1001, 100)
+    bridge._record_message(102, "actually wait", "manager", 1002, 101)
+
+    chain = bridge._walk_reply_chain(102)
+    assert len(chain) == 3
+    assert chain[0]["sender"] == "lee"
+    assert chain[1]["sender"] == "manager"
+    assert chain[2]["sender"] == "manager"
+    assert str(chain[0]["text"]) == "deploy done"
+
+    formatted = bridge.CommandRouter._format_chain(chain)
+    assert 'ts="1970-01-01T00:16:40Z"' in formatted
+    assert 'deploy done' in formatted
+    assert 'ts="1970-01-01T00:16:41Z"' in formatted
+    assert 'nice, check logs' in formatted
+
+    bridge._msg_history.clear()
+    bridge._msg_history_order.clear()
+
+
+def test_message_history_bounded():
+    import bridge
+
+    bridge._msg_history.clear()
+    bridge._msg_history_order.clear()
+    for i in range(bridge._MSG_HISTORY_MAX + 50):
+        bridge._record_message(i, f"msg {i}", "test", i)
+    assert len(bridge._msg_history) == bridge._MSG_HISTORY_MAX
+    assert 0 not in bridge._msg_history
+    assert bridge._MSG_HISTORY_MAX + 49 in bridge._msg_history
+
+    bridge._msg_history.clear()
+    bridge._msg_history_order.clear()
+
+
+def test_walk_chain_handles_missing_parent():
+    import bridge
+
+    bridge._msg_history.clear()
+    bridge._msg_history_order.clear()
+    bridge._record_message(200, "orphan reply", "manager", 2000, 199)
+    chain = bridge._walk_reply_chain(200)
+    assert len(chain) == 1
+    assert chain[0]["sender"] == "manager"
+
+    bridge._msg_history.clear()
+    bridge._msg_history_order.clear()
 
 
 def test_markdown_to_telegram_html():

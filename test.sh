@@ -20316,10 +20316,11 @@ os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
 import bridge
 b = bridge.CommandRouter.__new__(bridge.CommandRouter)
 result = b.format_reply_context('do this', 'I did that', 1719403200)
-assert 'at 2024-06-26 12:00 UTC' in result, f'Expected timestamp in result, got {result!r}'
-assert 'Manager reply:' in result
+assert '<reply_thread>' in result, f'Expected reply_thread in result, got {result!r}'
+assert 'ts=\"2024-06-26T12:00:00Z\"' in result, f'Expected ISO timestamp, got {result!r}'
 assert 'do this' in result
 assert 'I did that' in result
+assert result.endswith('do this'), f'New message should be outside thread, got {result!r}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "format_reply_context includes timestamp"
@@ -20337,8 +20338,8 @@ os.environ.setdefault('TELEGRAM_BOT_TOKEN', 'test:token')
 import bridge
 b = bridge.CommandRouter.__new__(bridge.CommandRouter)
 result = b.format_reply_context('do this', 'I did that')
-assert 'at ' not in result, f'Unexpected timestamp in result: {result!r}'
-assert 'Context (your previous message):' in result
+assert '<reply_thread>' in result, f'Expected reply_thread, got {result!r}'
+assert result.endswith('do this'), f'New message should be at end, got {result!r}'
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
         success "format_reply_context works without timestamp"

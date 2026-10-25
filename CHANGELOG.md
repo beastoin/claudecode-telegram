@@ -1,5 +1,16 @@
 ## Changelog
 
+### v0.52.2 - Full reply thread context
+
+**Feature:** When the manager replies to a replied message in Telegram, workers now receive the full reply chain — not just the immediate parent.
+
+**Changes:**
+- Message history store (`_msg_history`): bounded ring buffer of 500 recent Telegram messages (inbound + outbound), keyed by `message_id`. Records text, sender, timestamp, and `reply_to_msg_id`.
+- Chain walking (`_walk_reply_chain`): follows `reply_to_msg_id` links up to 20 levels deep, returns chronological chain.
+- XML thread format: history wrapped in `<reply_thread><message ts="...">` tags, new message as plain text after the closing tag — clear separation of context vs actionable instruction.
+- Records incoming manager messages and outgoing worker messages with Telegram `message_id` for chain reconstruction.
+- 10 new tests: message history, chain walking, bounded eviction, format output.
+
 ### v0.52.1 - Resource alert re-alerting
 
 **Bug fix:** Resource alerts (disk, memory, IO, worktree) fired once and never repeated while the condition stayed critical. Manager missed the single disk-full alert among normal traffic.
