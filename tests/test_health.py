@@ -1168,3 +1168,88 @@ class TestFmtDuration:
 
     def test_zero(self):
         assert bridge._fmt_duration(0) == "0s"
+
+
+# ── _emit_alert unified delivery ─────────────────────────────────────
+
+
+class TestEmitAlert:
+    """Verify _emit_alert fans out to both Telegram and relay/worker delivery."""
+
+    def test_sends_to_telegram_and_relay(self):
+        from unittest.mock import MagicMock, patch
+
+        mock_transport = MagicMock()
+        mock_transport.send_text.return_value = {"ok": True, "result": {"message_id": 42}}
+        orig_transport = bridge.transport
+        orig_chat = bridge.admin_chat_id
+        bridge.transport = mock_transport
+        bridge.admin_chat_id = "12345"
+        try:
+            with patch.object(bridge, "_send_health_alert") as mock_relay:
+                result = bridge._emit_alert("test alert", tag="test")
+            mock_transport.send_text.assert_called_once_with("12345", "test alert")
+            mock_relay.assert_called_once_with("test alert")
+            assert result == {"ok": True, "result": {"message_id": 42}}
+        finally:
+            bridge.transport = orig_transport
+            bridge.admin_chat_id = orig_chat
+
+    def test_edit_message_path(self):
+        from unittest.mock import MagicMock, patch
+
+        mock_transport = MagicMock()
+        orig_transport = bridge.transport
+        orig_chat = bridge.admin_chat_id
+        bridge.transport = mock_transport
+        bridge.admin_chat_id = "12345"
+        try:
+            with patch.object(bridge, "_send_health_alert") as mock_relay:
+                bridge._emit_alert("resolved", tag="test", edit_msg_id=99)
+            mock_transport.edit_message.assert_called_once_with("12345", 99, "resolved")
+            mock_transport.send_text.assert_not_called()
+            mock_relay.assert_called_once_with("resolved")
+        finally:
+            bridge.transport = orig_transport
+            bridge.admin_chat_id = orig_chat
+
+    def test_no_admin_chat_still_relays(self):
+        from unittest.mock import MagicMock, patch
+
+        mock_transport = MagicMock()
+        orig_transport = bridge.transport
+        orig_chat = bridge.admin_chat_id
+        bridge.transport = mock_transport
+        bridge.admin_chat_id = None
+        try:
+            with patch.object(bridge, "_send_health_alert") as mock_relay:
+                result = bridge._emit_alert("alert text", tag="test")
+            mock_transport.send_text.assert_not_called()
+            mock_relay.assert_called_once_with("alert text")
+            assert result is None
+        finally:
+            bridge.transport = orig_transport
+            bridge.admin_chat_id = orig_chat
+
+    def test_watchdog_alert_uses_emit(self):
+        """_watchdog_alert flows through _emit_alert."""
+        from unittest.mock import patch
+
+        with patch.object(bridge, "_emit_alert") as mock_emit:
+            bridge._watchdog_alert("Disk", "disk full")
+        mock_emit.assert_called_once_with("disk full", tag="watchdog")
+
+    def test_watchdog_alert_skips_none(self):
+        from unittest.mock import patch
+
+        with patch.object(bridge, "_emit_alert") as mock_emit:
+            bridge._watchdog_alert("Disk", None)
+        mock_emit.assert_not_called()
+
+    def test_connector_on_alert_uses_emit(self):
+        from unittest.mock import patch
+
+        handler = bridge.connector_on_alert("github")
+        with patch.object(bridge, "_emit_alert") as mock_emit:
+            handler("GitHub poll failed")
+        mock_emit.assert_called_once_with("GitHub poll failed", tag="github")

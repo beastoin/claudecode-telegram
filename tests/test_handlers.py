@@ -112,13 +112,14 @@ class TestHandleNotify:
 
 
 class TestHandleHealthAlert:
-    def test_health_alert_sends_to_all_chats(self):
+    def test_health_alert_sends_via_emit_alert(self):
         import bridge
         handler = _make_handler()
         handler.handle_health_alert = bridge.Handler.handle_health_alert.__get__(handler, bridge.Handler)
         mock_transport = MagicMock()
         bridge.transport = mock_transport
-        with patch.object(bridge, "get_all_chat_ids", return_value=["12345"]):
+        bridge.admin_chat_id = "12345"
+        with patch.object(bridge, "_send_health_alert"):
             body = json.dumps({"worker": "lee", "issue": "stale", "transcript_age": 7200}).encode()
             handler.handle_health_alert(body)
         assert mock_transport.send_text.called
@@ -132,7 +133,8 @@ class TestHandleHealthAlert:
         handler.handle_health_alert = bridge.Handler.handle_health_alert.__get__(handler, bridge.Handler)
         mock_transport = MagicMock()
         bridge.transport = mock_transport
-        with patch.object(bridge, "get_all_chat_ids", return_value=["12345"]):
+        bridge.admin_chat_id = "12345"
+        with patch.object(bridge, "_send_health_alert"):
             body = json.dumps({"worker": "finn", "issue": "stale", "transcript_age": 900}).encode()
             handler.handle_health_alert(body)
         alert_text = mock_transport.send_text.call_args[0][1]
@@ -143,7 +145,8 @@ class TestHandleHealthAlert:
         handler = _make_handler()
         handler.handle_health_alert = bridge.Handler.handle_health_alert.__get__(handler, bridge.Handler)
         bridge.transport = MagicMock()
-        with patch.object(bridge, "get_all_chat_ids", return_value=[]):
+        bridge.admin_chat_id = None
+        with patch.object(bridge, "_send_health_alert"):
             body = json.dumps({"worker": "x", "issue": "stale", "transcript_age": 60}).encode()
             handler.handle_health_alert(body)
         handler.send_response.assert_called_with(200)

@@ -2121,11 +2121,7 @@ def connector_get_workers() -> set[str]:
 
 def connector_on_alert(tag: str) -> Callable:
     def handler(text: str) -> None:
-        if core.admin_chat_id:
-            with _log_suppress(
-                urllib.error.URLError, OSError, TimeoutError, tag=tag, msg="Failed to send Telegram alert: "
-            ):
-                send_telegram_message(core.admin_chat_id, text)
+        _emit_alert(text, tag=tag)
 
     return handler
 
@@ -3039,17 +3035,34 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
         return ""
 
 
+# --- Unified alert delivery ---
+def _emit_alert(text: str, *, tag: str = "alert", edit_msg_id: int | None = None) -> dict | None:
+    """Single delivery sink for all alerts: Telegram admin + relay channel + worker tmux.
+
+    Every alert source (resource probes, worker state, health signals, connectors,
+    JSONL hooks) flows through here. Cooldown/escalation stays in the caller —
+    this only handles delivery fan-out.
+    """
+    result = None
+    if admin_chat_id:
+        with _log_suppress(
+            urllib.error.URLError, OSError, TimeoutError, level=_LOG_ERROR, tag=tag, msg=f"{tag} send: "
+        ):
+            if edit_msg_id:
+                transport.edit_message(admin_chat_id, edit_msg_id, text)
+            else:
+                result = transport.send_text(admin_chat_id, text)
+    with _log_suppress(Exception, tag=tag, msg=f"{tag} worker relay failed: "):
+        _send_health_alert(text)
+    return result
+
+
 # --- Watchdog alerting ---
 def _watchdog_alert(category: str, text: str | None) -> None:
-    if not text or not admin_chat_id:
+    if not text:
         return
-    with _log_suppress(
-        urllib.error.URLError, OSError, TimeoutError, level=_LOG_ERROR, tag="watchdog", msg=f"{category} error: "
-    ):
-        transport.send_text(admin_chat_id, text)
-        _log(_LOG_WARN, "watchdog", f"{category}: {text.splitlines()[0]}")
-    with _log_suppress(Exception, tag="watchdog", msg=f"{category} worker alert failed: "):
-        _send_health_alert(text)
+    _log(_LOG_WARN, "watchdog", f"{category}: {text.splitlines()[0]}")
+    _emit_alert(text, tag="watchdog")
 
 
 def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
@@ -3095,18 +3108,17 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     else:
         text = f"{name}: {state} ({reason}). Check /team"
     _alert_log_append("fire", f"worker:{name}", state=state, reason=reason[:200], desc=text.splitlines()[0])
-    with _log_suppress(KeyError, level=_LOG_ERROR, tag="watchdog", msg="Watchdog alert error: "):
-        result = transport.send_text(admin_chat_id, text)
-        if result and result.get("ok"):
-            _log(_LOG_WARN, "watchdog", f"Alert sent for {name} ({state}): {text[:80]}")
-            _res = result.get("result", {})
-            msg_id = _res.get("message_id") if isinstance(_res, dict) else None
-            with watchdog.lock:
-                watchdog.last_alert_ts[name] = now
-                if msg_id:
-                    watchdog.alert_msg_ids[name] = (msg_id, text)
-        else:
-            _log(_LOG_WARN, "watchdog", f"Alert FAILED for {name} ({state}): {result}")
+    result = _emit_alert(text, tag="watchdog")
+    if result and result.get("ok"):
+        _log(_LOG_WARN, "watchdog", f"Alert sent for {name} ({state}): {text[:80]}")
+        _res = result.get("result", {})
+        msg_id = _res.get("message_id") if isinstance(_res, dict) else None
+        with watchdog.lock:
+            watchdog.last_alert_ts[name] = now
+            if msg_id:
+                watchdog.alert_msg_ids[name] = (msg_id, text)
+    else:
+        _log(_LOG_WARN, "watchdog", f"Alert FAILED for {name} ({state}): {result}")
 
 
 def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
@@ -3173,20 +3185,11 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
     if alert_info:
         old_msg_id, old_text = alert_info
         resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]})"
-        with suppress(urllib.error.URLError, OSError, TimeoutError):
-            transport.edit_message(admin_chat_id, old_msg_id, resolved_text)
-            _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved")
-            return
+        _emit_alert(resolved_text, tag="watchdog", edit_msg_id=old_msg_id)
+        _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved")
+        return
     text = f"✅ {name} is back to normal."
-    with _log_suppress(
-        urllib.error.URLError,
-        OSError,
-        TimeoutError,
-        level=_LOG_ERROR,
-        tag="watchdog",
-        msg="Watchdog resolved alert error: ",
-    ):
-        transport.send_text(admin_chat_id, text)
+    _emit_alert(text, tag="watchdog")
 
 
 def _handle_watchdog_transition(
@@ -7404,9 +7407,7 @@ def handle_health_alert(handler: Handler, body: bytes = b"") -> None:
         age_human = f"{age // 3600}h{(age % 3600) // 60}m" if age >= 3600 else f"{age // 60}m"
         alert_text = f"🔴 {worker}: JSONL transcript stale ({age_human}). Session active but not recording. `/restart {worker}` to fix."
         _log(_LOG_WARN, "health", f"Health alert: {worker} — {issue} (age={age}s)")
-        chat_ids = get_all_chat_ids()
-        for chat_id in chat_ids:
-            transport.send_text(chat_id, alert_text)
+        _emit_alert(alert_text, tag="health")
         handler._send_json(200, {"ok": True})
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "bridge", f"Health alert error: {e}")

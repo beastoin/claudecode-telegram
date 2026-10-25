@@ -1,5 +1,21 @@
 ## Changelog
 
+### v0.52.4 - Unified alert delivery (`_emit_alert`)
+
+**Architecture:** Merged 5 disconnected alert delivery paths into a single `_emit_alert()` sink. All alerts now reach both Telegram (manager) and the relay channel (workers via `BRIDGE_ALERT_WORKERS`).
+
+**Problem:** Worker-state alerts (DEAD/OFFLINE/STUCK/POISONED), connector errors (Gmail/GitHub), and JSONL health hook alerts only sent to Telegram — workers configured in `BRIDGE_ALERT_WORKERS` never received them. Only resource probe alerts (disk/mem/IO) and health signal alerts were wired to relay delivery.
+
+**Changes:**
+- `_emit_alert(text, *, tag, edit_msg_id)`: new unified delivery function — sends to Telegram admin chat + posts to relay channel + delivers to worker tmux sessions.
+- `_watchdog_alert()`: simplified to log + call `_emit_alert()` (was: inline `transport.send_text` + separate `_send_health_alert`).
+- `_send_watchdog_alert()`: worker state alerts now reach workers via `_emit_alert()`.
+- `_send_resolved_alert()`: worker recovery alerts ("back to normal") now reach workers. Edit-message path preserved for Telegram inline edits.
+- `connector_on_alert()`: Gmail/GitHub connector errors now reach workers.
+- `handle_health_alert()`: POST /alerts (JSONL stale transcript) now routes through `_emit_alert()` instead of iterating all chat_ids.
+- 6 new tests: `TestEmitAlert` — Telegram+relay delivery, edit path, no-admin fallback, watchdog/connector integration.
+- Domain-specific cooldowns preserved: `ResourceAlertState` (resource probes), `watchdog.last_alert_ts` (worker state), `_alert_active/_alert_last_sent` (health signals). Only delivery is merged.
+
 ### v0.52.3 - GitHub connector: issue body @mention support
 
 **Feature:** GitHub connector now detects @mentions in issue and PR body descriptions, not just in comments. When someone creates a new issue or PR with @mentions of registered workers in the body text, those workers receive the notification.
