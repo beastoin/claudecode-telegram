@@ -684,6 +684,15 @@ def _bool_field(d: Mapping[str, object], key: str, default: bool = False) -> boo
     return bool(val)
 
 
+def _format_duration(seconds: int | float) -> str:
+    """Format seconds as 'Xd Yh', 'Xh Ym', or 'Xm'."""
+    s = max(0, int(seconds))
+    d, rem = divmod(s, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    return f"{d}d {h}h" if d > 0 else f"{h}h {m}m" if h > 0 else f"{m}m"
+
+
 _LOG_ERROR: str = "ERROR"
 _LOG_WARN: str = "WARN"
 _LOG_INFO: str = "INFO"
