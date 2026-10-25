@@ -520,6 +520,7 @@ class GithubComment(TypedDict, total=False):
 class GithubState(TypedDict):
     last_poll_time: str | None
     seen_ids: list[int]
+    seen_issue_ids: list[int]
 
 
 class Attachment(TypedDict, total=False):
@@ -574,6 +575,7 @@ class GithubStatus(TypedDict):
     repos: list[str]
     last_poll_time: str | None
     seen_ids_count: int
+    seen_issue_ids_count: int
 
 
 class TranscriptSyncState(TypedDict, total=False):

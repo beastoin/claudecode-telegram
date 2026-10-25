@@ -5,6 +5,7 @@ forwarding, dedup, and poll cycles. No scaffolding or constant checks.
 """
 import base64
 import json
+import subprocess
 import time
 import threading
 import pytest
@@ -1487,3 +1488,290 @@ class TestConnectorRestartThreadRegistration:
             ok, msg = restart_connector("github")
             assert ok
             mock_health.register_thread.assert_called_once_with("github-poller", mock_inst._thread)
+
+
+# ── GitHub Issue Body @Mention Support ─────────────────────────────
+
+
+def make_issue(author="beastoin", body="check this @mon", title="Bug report",
+               issue_id=5000, number=300, kind="issue",
+               html_url="https://github.com/BasedHardware/omi/issues/300",
+               repo="BasedHardware/omi"):
+    return {
+        "id": issue_id,
+        "author": author,
+        "body": body,
+        "title": title,
+        "number": number,
+        "kind": kind,
+        "html_url": html_url,
+        "repo": repo,
+    }
+
+
+class TestGitHubProcessIssue:
+    """_process_issue delivers issue bodies that contain @mentions of registered workers."""
+
+    def test_delivers_issue_with_mentions(self):
+        gc = make_github_connector(from_user="beastoin", get_registered_workers=lambda: {"mon", "lee"})
+        issue = make_issue(author="beastoin", body="@mon please check the deploy logs", title="Deploy failure")
+        gc._process_issue(issue)
+        gc.on_message.assert_called_once()
+        targets, html, plain, atts = gc.on_message.call_args[0]
+        assert "mon" in targets
+        assert "Deploy failure" in plain
+        assert "please check the deploy logs" in plain
+        assert "beast github show 300" in plain
+        assert "beast github comment 300" in plain
+
+    def test_wrong_author_skipped(self):
+        gc = make_github_connector(from_user="beastoin")
+        issue = make_issue(author="random-user", body="@mon hello")
+        gc._process_issue(issue)
+        gc.on_message.assert_not_called()
+        assert issue["id"] in gc._seen_issue_ids
+
+    def test_empty_body_skipped(self):
+        gc = make_github_connector(from_user="beastoin")
+        issue = make_issue(author="beastoin", body="   ")
+        gc._process_issue(issue)
+        gc.on_message.assert_not_called()
+        assert issue["id"] in gc._seen_issue_ids
+
+    def test_no_mentions_skipped(self):
+        gc = make_github_connector(from_user="beastoin")
+        issue = make_issue(author="beastoin", body="General bug report with no mentions")
+        gc._process_issue(issue)
+        gc.on_message.assert_not_called()
+        assert issue["id"] in gc._seen_issue_ids
+
+    def test_dedup_same_issue(self):
+        gc = make_github_connector(from_user="beastoin", get_registered_workers=lambda: {"mon"})
+        issue = make_issue(author="beastoin", body="@mon check this", issue_id=9999)
+        gc._process_issue(issue)
+        gc._process_issue(issue)
+        assert gc.on_message.call_count == 1
+
+    def test_pr_body_with_mentions(self):
+        gc = make_github_connector(from_user="beastoin", get_registered_workers=lambda: {"taro"})
+        issue = make_issue(
+            author="beastoin", body="@taro review the migration changes",
+            title="DB migration", kind="PR", number=450,
+            html_url="https://github.com/BasedHardware/omi/pull/450",
+        )
+        gc._process_issue(issue)
+        gc.on_message.assert_called_once()
+        targets, html, plain, atts = gc.on_message.call_args[0]
+        assert "taro" in targets
+        assert "DB migration" in plain
+        assert "beast github show 450" in plain
+
+    def test_multi_mention_in_body(self):
+        gc = make_github_connector(from_user="beastoin", get_registered_workers=lambda: {"mon", "taro", "lee"})
+        issue = make_issue(author="beastoin", body="@mon @taro both look at this")
+        gc._process_issue(issue)
+        gc.on_message.assert_called_once()
+        targets = gc.on_message.call_args[0][0]
+        assert "mon" in targets
+        assert "taro" in targets
+
+    def test_metadata_includes_repo(self):
+        gc = make_github_connector(from_user="beastoin", get_registered_workers=lambda: {"mon"})
+        issue = make_issue(author="beastoin", body="@mon check", repo="beastoin/agent-swift")
+        gc._process_issue(issue)
+        metadata = gc.on_message.call_args[1].get("metadata", {})
+        assert metadata.get("repo") == "beastoin/agent-swift"
+        assert metadata.get("comment_id") == issue["id"]
+
+    def test_author_case_insensitive(self):
+        gc = make_github_connector(from_user="beastoin", get_registered_workers=lambda: {"mon"})
+        issue = make_issue(author="Beastoin", body="@mon look here")
+        gc._process_issue(issue)
+        gc.on_message.assert_called_once()
+
+    def test_missing_author_skipped(self):
+        gc = make_github_connector(from_user="beastoin")
+        issue = make_issue(body="@mon hello")
+        issue["author"] = ""
+        gc._process_issue(issue)
+        gc.on_message.assert_not_called()
+
+    def test_invalid_id_skipped(self):
+        gc = make_github_connector(from_user="beastoin")
+        issue = make_issue(body="@mon hello")
+        issue["id"] = "not-an-int"
+        gc._process_issue(issue)
+        gc.on_message.assert_not_called()
+
+
+class TestGitHubPollOnceWithIssues:
+    """poll_once processes both comments and issues."""
+
+    def test_polls_comments_and_issues(self):
+        gc = make_github_connector(from_user="beastoin", get_registered_workers=lambda: {"mon"})
+        gc._last_poll_time = "2026-10-25T00:00:00Z"
+        comment = make_comment(user="beastoin", body="comment note", comment_id=100)
+        issue = make_issue(author="beastoin", body="@mon issue note", issue_id=200)
+        with patch.object(gc, "_get_all_comments", return_value=([comment], True)), \
+             patch.object(gc, "_get_all_issues", return_value=[issue]):
+            gc.poll_once()
+        assert gc.on_message.call_count == 2
+
+    def test_issue_error_doesnt_block_poll_time_update(self):
+        gc = make_github_connector(from_user="beastoin")
+        gc._last_poll_time = "2026-10-25T00:00:00Z"
+        bad_issue = make_issue(author="beastoin", body="@mon hello")
+        with patch.object(gc, "_get_all_comments", return_value=([], True)), \
+             patch.object(gc, "_get_all_issues", return_value=[bad_issue]), \
+             patch.object(gc, "_process_issue", side_effect=Exception("boom")):
+            gc.poll_once()
+        assert gc._last_poll_time == "2026-10-25T00:00:00Z"
+
+    def test_no_issues_still_advances_poll_time(self):
+        gc = make_github_connector(from_user="beastoin")
+        gc._last_poll_time = "2026-10-25T00:00:00Z"
+        with patch.object(gc, "_get_all_comments", return_value=([], True)), \
+             patch.object(gc, "_get_all_issues", return_value=[]):
+            gc.poll_once()
+        assert gc._last_poll_time != "2026-10-25T00:00:00Z"
+
+
+class TestGitHubIssueStatePersistence:
+    """_save_state / _load_state round-trip seen_issue_ids."""
+
+    def test_save_load_roundtrip(self, tmp_path):
+        state_file = str(tmp_path / "github_state.json")
+        gc = make_github_connector()
+        gc._state_file = state_file
+        gc._last_poll_time = "2026-10-25T12:00:00Z"
+        gc._seen_ids.add(100)
+        gc._seen_ids.add(200)
+        gc._seen_issue_ids.add(5000)
+        gc._seen_issue_ids.add(6000)
+        gc._save_state()
+
+        gc2 = make_github_connector()
+        gc2._state_file = state_file
+        restored = gc2._load_state()
+        assert restored is True
+        assert gc2._last_poll_time == "2026-10-25T12:00:00Z"
+        assert 100 in gc2._seen_ids
+        assert 200 in gc2._seen_ids
+        assert 5000 in gc2._seen_issue_ids
+        assert 6000 in gc2._seen_issue_ids
+
+    def test_load_without_issue_ids_ok(self, tmp_path):
+        """State file from older bridge version (no seen_issue_ids key) loads fine."""
+        state_file = str(tmp_path / "github_state.json")
+        import json
+        with open(state_file, "w") as f:
+            json.dump({"last_poll_time": "2026-10-25T12:00:00Z", "seen_ids": [1, 2, 3]}, f)
+        gc = make_github_connector()
+        gc._state_file = state_file
+        restored = gc._load_state()
+        assert restored is True
+        assert gc._seen_ids == {1, 2, 3}
+        assert gc._seen_issue_ids == set()
+
+    def test_status_includes_issue_count(self):
+        gc = make_github_connector()
+        gc._seen_issue_ids = {1, 2, 3}
+        status = gc.status()
+        assert status["seen_issue_ids_count"] == 3
+
+
+class TestGitHubBeastFetchIssues:
+    """_beast_fetch_issues calls beast github issues CLI correctly."""
+
+    def test_success(self):
+        gc = make_github_connector()
+        beast_json = '[{"id":1,"author":"beastoin","body":"hello","title":"Bug","number":100,"kind":"issue","html_url":"https://github.com/o/r/issues/100"}]'
+        mock_result = MagicMock(returncode=0, stdout=beast_json, stderr="")
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = gc._beast_fetch_issues("BasedHardware/omi", "1h")
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+        cmd = mock_run.call_args[0][0]
+        assert "issues" in cmd
+        assert "--repo" in cmd
+        assert "BasedHardware/omi" in cmd
+
+    def test_failure_returns_none(self):
+        gc = make_github_connector()
+        mock_result = MagicMock(returncode=1, stdout="", stderr="error")
+        with patch("subprocess.run", return_value=mock_result):
+            result = gc._beast_fetch_issues("BasedHardware/omi", "1h")
+        assert result is None
+
+    def test_timeout_returns_none(self):
+        gc = make_github_connector()
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 60)):
+            result = gc._beast_fetch_issues("BasedHardware/omi", "1h")
+        assert result is None
+
+    def test_invalid_json_returns_none(self):
+        gc = make_github_connector()
+        mock_result = MagicMock(returncode=0, stdout="not json", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = gc._beast_fetch_issues("BasedHardware/omi", "1h")
+        assert result is None
+
+    def test_empty_output_returns_empty_list(self):
+        gc = make_github_connector()
+        mock_result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("subprocess.run", return_value=mock_result):
+            result = gc._beast_fetch_issues("BasedHardware/omi", "1h")
+        assert result == []
+
+
+class TestGitHubGetAllIssues:
+    """_get_all_issues merges across repos and deduplicates."""
+
+    def test_merges_from_multiple_repos(self):
+        gc = make_github_connector(repo=["BasedHardware/omi", "beastoin/agent-swift"])
+        issue1 = {"id": 100, "author": "beastoin", "body": "one"}
+        issue2 = {"id": 200, "author": "beastoin", "body": "two"}
+
+        def side_effect(repo, since, **kw):
+            if repo == "BasedHardware/omi":
+                return [issue1]
+            return [issue2]
+
+        with patch.object(gc, "_beast_fetch_issues", side_effect=side_effect):
+            result = gc._get_all_issues("1h")
+        assert len(result) == 2
+        repos = {r["repo"] for r in result}
+        assert "BasedHardware/omi" in repos
+        assert "beastoin/agent-swift" in repos
+
+    def test_dedup_across_repos(self):
+        gc = make_github_connector(repo=["BasedHardware/omi", "beastoin/agent-swift"])
+        same_issue = {"id": 100, "author": "beastoin", "body": "dup"}
+        with patch.object(gc, "_beast_fetch_issues", return_value=[same_issue]):
+            result = gc._get_all_issues("1h")
+        assert len(result) == 1
+
+    def test_partial_failure_continues(self):
+        gc = make_github_connector(repo=["BasedHardware/omi", "beastoin/agent-swift"])
+        issue = {"id": 100, "author": "beastoin", "body": "ok"}
+
+        def side_effect(repo, since, **kw):
+            if repo == "BasedHardware/omi":
+                return None
+            return [issue]
+
+        with patch.object(gc, "_beast_fetch_issues", side_effect=side_effect):
+            result = gc._get_all_issues("1h")
+        assert len(result) == 1
+
+
+class TestGitHubIssuePruning:
+    """_prune_seen_ids also prunes issue IDs."""
+
+    def test_prune_trims_issue_ids(self):
+        from bridge import _MAX_SEEN_IDS, _PRUNE_KEEP
+        gc = make_github_connector()
+        gc._seen_issue_ids = set(range(_MAX_SEEN_IDS + 100))
+        gc._prune_seen_ids()
+        assert len(gc._seen_issue_ids) == _PRUNE_KEEP

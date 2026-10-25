@@ -1516,6 +1516,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
         self._state_file: str = state_file
         self._last_poll_time: str | None = None
         self._seen_ids: set[int] = set()
+        self._seen_issue_ids: set[int] = set()
 
     def preflight_check(self) -> tuple[bool, str]:
         ok_repos: list[str] = []
@@ -1575,6 +1576,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 repos=self.repos,
                 last_poll_time=self._last_poll_time,
                 seen_ids_count=len(self._seen_ids),
+                seen_issue_ids_count=len(self._seen_issue_ids),
             )
             s["handler_errors"] = self._handler_errors  # type: ignore[typeddict-unknown-key]
             return s
@@ -1596,6 +1598,11 @@ class GitHubConnector(BaseConnector[GithubComment]):
                     for sid in seen_raw:
                         if isinstance(sid, int) and not isinstance(sid, bool):
                             self._seen_ids.add(sid)
+                seen_issue_raw = data.get("seen_issue_ids")
+                if isinstance(seen_issue_raw, list):
+                    for sid in seen_issue_raw:
+                        if isinstance(sid, int) and not isinstance(sid, bool):
+                            self._seen_issue_ids.add(sid)
                 return bool(self._last_poll_time)
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             return False
@@ -1607,6 +1614,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
             state = GithubState(
                 last_poll_time=self._last_poll_time,
                 seen_ids=sorted(self._seen_ids)[-_MAX_SEEN_IDS:],
+                seen_issue_ids=sorted(self._seen_issue_ids)[-_MAX_SEEN_IDS:],
             )
         try:
             _atomic_write(self._state_file, json.dumps(state))
@@ -1618,8 +1626,13 @@ class GitHubConnector(BaseConnector[GithubComment]):
         if restored:
             with self._lock:
                 seen_count = len(self._seen_ids)
+                seen_issue_count = len(self._seen_issue_ids)
                 poll_time = self._last_poll_time
-            _log(_LOG_INFO, "github", f"Restart — restored state: {seen_count} seen IDs, since={poll_time}")
+            _log(
+                _LOG_INFO,
+                "github",
+                f"Restart — restored state: {seen_count} seen comment IDs, {seen_issue_count} seen issue IDs, since={poll_time}",
+            )
         else:
             initial_time = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
             with self._lock:
@@ -1633,7 +1646,17 @@ class GitHubConnector(BaseConnector[GithubComment]):
                             self._seen_ids.add(cid)
                 _log(_LOG_INFO, "github", f"First run — seeded {len(seed)} existing comments as seen")
             else:
-                _log(_LOG_INFO, "github", f"First run — no comments to seed")
+                _log(_LOG_INFO, "github", "First run — no comments to seed")
+            issue_seed = self._get_all_issues(initial_time)
+            if issue_seed:
+                with self._lock:
+                    for iss in issue_seed:
+                        iid = iss.get("id")
+                        if isinstance(iid, int) and not isinstance(iid, bool):
+                            self._seen_issue_ids.add(iid)
+                _log(_LOG_INFO, "github", f"First run — seeded {len(issue_seed)} existing issues as seen")
+            else:
+                _log(_LOG_INFO, "github", "First run — no issues to seed")
             self._save_state()
         with self._lock:
             poll_time = self._last_poll_time
@@ -1716,6 +1739,96 @@ class GitHubConnector(BaseConnector[GithubComment]):
         if not any_success:
             return None, False
         return merged, is_complete
+
+    def _beast_fetch_issues(self, repo: str, since: str, timeout: int = 60) -> list[dict] | None:
+        """Fetch recently updated issues/PRs for one repo via beast github CLI. Returns list or None on failure."""
+        try:
+            result = subprocess.run(
+                [self.beast_bin, "github", "issues", "--since", since, "--json", "--repo", repo],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if result.returncode != 0:
+                _log(_LOG_WARN, "github", f"beast github issues error for {repo}: {result.stderr.strip()}")
+                return None
+            raw = result.stdout.strip()
+            if not raw:
+                return []
+            parsed: object = json.loads(raw)
+            if not isinstance(parsed, list):
+                _log(_LOG_WARN, "github", f"beast github issues unexpected type for {repo}: {type(parsed).__name__}")
+                return None
+            return [c for c in parsed if isinstance(c, dict)]
+        except json.JSONDecodeError as e:
+            _log(_LOG_WARN, "github", f"beast github issues invalid JSON for {repo}: {e}")
+            return None
+        except subprocess.TimeoutExpired:
+            _log(_LOG_WARN, "github", f"beast github issues timed out for {repo}")
+            return None
+        except OSError as e:
+            _log(_LOG_WARN, "github", f"beast github issues exception for {repo}: {e}")
+            return None
+
+    def _get_all_issues(self, since: str) -> list[dict]:
+        """Fetch recently updated issues/PRs across all repos. Returns merged list (may be empty)."""
+        seen: set[int] = set()
+        merged: list[dict] = []
+        for repo in self.repos:
+            issues = self._beast_fetch_issues(repo, since)
+            if issues is not None:
+                for iss in issues:
+                    iid = iss.get("id", 0)
+                    if isinstance(iid, int) and not isinstance(iid, bool) and iid not in seen:
+                        seen.add(iid)
+                        iss["repo"] = repo
+                        merged.append(iss)
+        return merged
+
+    def _process_issue(self, issue: dict) -> None:
+        """Process an issue/PR body for @mentions. Only fires for unseen issues from allowed senders."""
+        iid = issue.get("id", 0)
+        if not isinstance(iid, int) or isinstance(iid, bool) or iid == 0:
+            return
+        with self._lock:
+            if iid in self._seen_issue_ids:
+                return
+        author = issue.get("author", "")
+        if not isinstance(author, str) or not author:
+            with self._lock:
+                self._seen_issue_ids.add(iid)
+            return
+        if not self.sender_filter or author.lower() != self.sender_filter.lower():
+            with self._lock:
+                self._seen_issue_ids.add(iid)
+            return
+        body: str = str(issue.get("body", "")).strip() if isinstance(issue.get("body"), str) else ""
+        if not body:
+            with self._lock:
+                self._seen_issue_ids.add(iid)
+            return
+        targets, cleaned = self.parse_mentions(body)
+        if not targets:
+            with self._lock:
+                self._seen_issue_ids.add(iid)
+            return
+        number = issue.get("number", 0)
+        kind = issue.get("kind", "issue")
+        html_url = issue.get("html_url", "")
+        title = issue.get("title", "")
+        repo = issue.get("repo", self.repos[0] if self.repos else "")
+        context = IssueContext(number=str(number), kind=kind, url=str(html_url))
+        display_body = f"**{title}**\n\n{cleaned}" if title else cleaned
+        html_text, plain_text = self.format_comment(display_body, context)
+        safe_repo = str(repo).replace("'", "'\\''")
+        reply_hint = f"\n\nView: beast github show {number} --repo '{safe_repo}'"
+        reply_hint += f"\nReply: beast github comment {number} --repo '{safe_repo}' --body 'your reply'"
+        plain_text += reply_hint
+        metadata = ConnectorMetadata(number=str(number), repo=str(repo), comment_id=iid)
+        self.on_message(targets, html_text, plain_text, [], metadata=metadata)
+        with self._lock:
+            self._seen_issue_ids.add(iid)
+        _log(_LOG_INFO, "github", f"{kind} #{number} body: -> {targets}")
 
     def extract_sender(self, comment: GithubComment) -> str:
         user = comment.get("user")
@@ -1827,6 +1940,15 @@ class GitHubConnector(BaseConnector[GithubComment]):
                 had_errors = True
                 self.track_handler_error(str(e))
                 health.error("github", str(e))
+        all_issues = self._get_all_issues(poll_time)
+        for issue in all_issues:
+            try:
+                self._process_issue(issue)
+            except Exception as e:
+                _log(_LOG_ERROR, "github", f"Error processing issue {issue.get('id')}: {e}")
+                had_errors = True
+                self.track_handler_error(str(e))
+                health.error("github", str(e))
         if not had_errors:
             self.clear_handler_errors()
             health.ok("github")
@@ -1846,6 +1968,8 @@ class GitHubConnector(BaseConnector[GithubComment]):
         with self._lock:
             if len(self._seen_ids) > _MAX_SEEN_IDS:
                 self._seen_ids = set(sorted(self._seen_ids)[-_PRUNE_KEEP:])
+            if len(self._seen_issue_ids) > _MAX_SEEN_IDS:
+                self._seen_issue_ids = set(sorted(self._seen_issue_ids)[-_PRUNE_KEEP:])
 
     def stop(self) -> None:
         super().stop()  # Wait for poll thread to exit before saving
