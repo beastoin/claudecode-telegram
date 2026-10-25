@@ -1,5 +1,19 @@
 ## Changelog
 
+### v0.52.3 - GitHub connector: issue body @mention support
+
+**Feature:** GitHub connector now detects @mentions in issue and PR body descriptions, not just in comments. When someone creates a new issue or PR with @mentions of registered workers in the body text, those workers receive the notification.
+
+**Changes:**
+- `beast github issues` CLI subcommand: calls GitHub Issues API (`/repos/{repo}/issues?since=`), returns both issues and PRs with body text, JSON output mode for bridge integration.
+- `_beast_fetch_issues()` / `_get_all_issues()`: fetches recently updated issues across all configured repos, deduplicates by issue ID.
+- `_process_issue()`: checks sender filter (author match), parses @mentions from body, only delivers issues with registered worker mentions — issues without mentions are silently marked seen.
+- Separate `_seen_issue_ids` set: issue IDs and comment IDs are in different GitHub ID spaces, avoids collision.
+- State persistence: `seen_issue_ids` saved/restored alongside `seen_ids` in state file. Backward-compatible — loads fine from older state files without the field.
+- First-run seeding: existing issues marked as seen on initial startup (same pattern as comment seeding).
+- `_prune_seen_ids()` also trims issue ID set.
+- 26 new tests: `TestGitHubProcessIssue` (11), `TestGitHubPollOnceWithIssues` (3), `TestGitHubIssueStatePersistence` (3), `TestGitHubBeastFetchIssues` (5), `TestGitHubGetAllIssues` (3), `TestGitHubIssuePruning` (1).
+
 ### v0.52.2 - Full reply thread context
 
 **Feature:** When the manager replies to a replied message in Telegram, workers now receive the full reply chain — not just the immediate parent.
