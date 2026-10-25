@@ -1667,11 +1667,28 @@ class GitHubConnector(BaseConnector[GithubComment]):
             f"Started (interval={self.poll_interval}s, repos={repos_str}, user={self.sender_filter}, since={poll_time})",
         )
 
+    @staticmethod
+    def _iso_to_duration(iso_time: str) -> str:
+        """Convert ISO timestamp to Go duration string for beast CLI --since flag.
+
+        beast CLI expects durations like '1h', '30m', not ISO timestamps.
+        """
+        try:
+            dt = datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
+            diff = datetime.now(UTC) - dt
+            total_seconds = max(int(diff.total_seconds()), 60)
+            if total_seconds >= 3600:
+                return f"{(total_seconds + 3599) // 3600}h"
+            return f"{(total_seconds + 59) // 60}m"
+        except (ValueError, TypeError):
+            return "1h"
+
     def _beast_fetch(self, repo: str, since: str, timeout: int = 60) -> list[GithubComment] | None:
         """Fetch comments for one repo via beast github CLI. Returns normalized comments or None on failure."""
+        since_duration = self._iso_to_duration(since)
         try:
             result = subprocess.run(
-                [self.beast_bin, "github", "comments", "--since", since, "--json", "--repo", repo],
+                [self.beast_bin, "github", "comments", "--since", since_duration, "--json", "--repo", repo],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -1742,9 +1759,10 @@ class GitHubConnector(BaseConnector[GithubComment]):
 
     def _beast_fetch_issues(self, repo: str, since: str, timeout: int = 60) -> list[dict] | None:
         """Fetch recently updated issues/PRs for one repo via beast github CLI. Returns list or None on failure."""
+        since_duration = self._iso_to_duration(since)
         try:
             result = subprocess.run(
-                [self.beast_bin, "github", "issues", "--since", since, "--json", "--repo", repo],
+                [self.beast_bin, "github", "issues", "--since", since_duration, "--json", "--repo", repo],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -9593,14 +9611,8 @@ class CommandRouter:
                 chat_id, f"Could not send to {session_name.capitalize()}. Try /restart.", outcome="Needs decision"
             )
             return
-        if msg_id and send_ok:
-            host = get_worker_host(session_name)
-            if (
-                (not backend.is_interactive or tmux_prompt_empty(session.get("tmux", ""), host=host))
-                and self.transport
-                and chat_id is not None
-            ):
-                self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
+        if msg_id and send_ok and self.transport and chat_id is not None:
+            self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
 
 
 PostRouteHandler = Callable[["Handler", bytes, re.Match[str] | None], None]  # type: ignore[misc]

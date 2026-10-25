@@ -1,5 +1,17 @@
 ## Changelog
 
+### v0.52.5 - Fix missing 👀 reactions + GitHub connector --since format
+
+**Bug 1 — Missing 👀 reactions:** The 👀 emoji reaction (visual confirmation that a message was received by the bridge) was suppressed when a worker was mid-turn. The reaction was gated on `tmux_prompt_empty()`, so busy workers never got reactions — managers couldn't tell if messages were delivered. Fix: always send 👀 when `send_ok` is true, regardless of worker prompt state.
+
+**Bug 2 — GitHub connector failing after restart:** `_beast_fetch()` and `_beast_fetch_issues()` passed ISO timestamps (e.g. `2026-10-24T23:33:27Z`) to `beast github --since`, but the beast CLI expects Go duration format (`1h`, `30m`). After any bridge restart that restored `_last_poll_time` from disk, all GitHub polling failed with `invalid --since: time: unknown unit "-"`. Fix: new `_iso_to_duration()` converts ISO timestamps to duration strings before calling beast CLI.
+
+**Changes:**
+- `_dispatch_message()`: removed `tmux_prompt_empty()` gate from 👀 reaction — now fires unconditionally on successful delivery.
+- `_iso_to_duration()`: converts ISO timestamp to Go duration string (rounds up to nearest hour/minute, minimum 60s, fallback "1h").
+- `_beast_fetch()` / `_beast_fetch_issues()`: call `_iso_to_duration()` before passing `--since` to beast CLI.
+- `shared.py` VERSION synced to 0.52.5.
+
 ### v0.52.4 - Unified alert delivery (`_emit_alert`)
 
 **Architecture:** Merged 5 disconnected alert delivery paths into a single `_emit_alert()` sink. All alerts now reach both Telegram (manager) and the relay channel (workers via `BRIDGE_ALERT_WORKERS`).
