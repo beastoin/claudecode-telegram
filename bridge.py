@@ -3036,7 +3036,7 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
 
 
 # --- Unified alert delivery ---
-def _emit_alert(text: str, *, tag: str = "alert", edit_msg_id: int | None = None) -> dict | None:
+def _emit_alert(text: str, *, tag: str = "alert", edit_msg_id: int | None = None) -> TelegramApiResponseDict | None:
     """Single delivery sink for all alerts: Telegram admin + relay channel + worker tmux.
 
     Every alert source (resource probes, worker state, health signals, connectors,
