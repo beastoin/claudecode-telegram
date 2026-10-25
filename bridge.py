@@ -2502,11 +2502,12 @@ def _probe_metric(  # type: ignore[explicit-any]
     *,
     metric: str,
     usage_store: dict[str, Any],  # type: ignore[explicit-any]
-    alerted_store: dict[str, Any],  # type: ignore[explicit-any]
-    alert_ts_store: dict[str, float],
+    alert_state_store: dict[str, ResourceAlertState],
     cooldown: int | float,
+    re_alert_interval: int | float,
     is_critical_fn: Callable[[dict[str, Any]], bool],  # type: ignore[explicit-any]
     alert_fmt: Callable[[str, dict[str, Any]], str],  # type: ignore[explicit-any]
+    re_alert_fmt: Callable[[str, dict[str, Any], float, int], str],
     recovery_fmt: Callable[[str, dict[str, Any]], str],
     category: str,
 ) -> None:  # type: ignore[explicit-any]
@@ -2522,14 +2523,21 @@ def _probe_metric(  # type: ignore[explicit-any]
         alert_text = None
         with watchdog.lock:
             usage_store[host_label] = {**usage, "ts": now}
-            was_alerted = alerted_store.get(host_label, False)
-            if is_crit and not was_alerted:
-                if now - alert_ts_store.get(host_label, 0) >= cooldown:
+            state = alert_state_store.get(host_label)
+            if state is None:
+                state = ResourceAlertState()
+                alert_state_store[host_label] = state
+            if is_crit and not state.alerted:
+                if now - state.last_alert_ts >= cooldown:
                     alert_text = alert_fmt(host_label, usage)
-                    alert_ts_store[host_label] = now
-                    alerted_store[host_label] = True
-            elif not is_crit and was_alerted:
-                alerted_store[host_label] = False
+                    state.fire(now)
+            elif is_crit and state.should_re_alert(now, re_alert_interval):
+                dur = state.duration(now)
+                count = state.re_alert_count + 1
+                alert_text = re_alert_fmt(host_label, usage, dur, count)
+                state.fire(now)
+            elif not is_crit and state.alerted:
+                state.recover()
                 alert_text = recovery_fmt(host_label, usage)
         _watchdog_alert(category, alert_text)
 
@@ -2539,11 +2547,12 @@ def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
         remote_hosts,
         metric="disk",
         usage_store=host_health.disk_usage,
-        alerted_store=host_health.disk_alerted,
-        alert_ts_store=host_health.disk_alert_ts,
+        alert_state_store=host_health.disk_alert,
         cooldown=_res_cfg.disk_cooldown,
+        re_alert_interval=_res_cfg.disk_re_alert,
         is_critical_fn=lambda u: u["pct"] >= _res_cfg.disk_alert_pct or u["free_gb"] < _res_cfg.disk_alert_gb,
         alert_fmt=lambda h, u: f"🔴 Disk space critical: {h}\nUsage: {u['pct']}% ({u['free_gb']:.1f}GB free of {u['total_gb']:.0f}GB)\nAction needed: clean up old files, worktrees, or logs",
+        re_alert_fmt=lambda h, u, dur, n: f"🔴 Disk STILL critical: {h} (for {_fmt_duration(dur)}, alert #{n + 1})\nUsage: {u['pct']}% ({u['free_gb']:.1f}GB free of {u['total_gb']:.0f}GB)\nAction needed: clean up old files, worktrees, or logs",
         recovery_fmt=lambda h, u: f"✅ Disk space recovered: {h} — {u['pct']}% ({u['free_gb']:.1f}GB free)",
         category="Disk",
     )
@@ -2556,15 +2565,22 @@ def _probe_mem_all_hosts(remote_hosts: set[str]) -> None:
             text += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
         return text
 
+    def _re_fmt(h: str, u: dict[str, Any], dur: float, n: int) -> str:  # type: ignore[explicit-any]
+        text = f"🧠 Memory STILL critical: {h} (for {_fmt_duration(dur)}, alert #{n + 1})\nUsage: {u['pct']}% ({u['avail_gb']:.1f}GB available of {u['total_gb']:.0f}GB)"
+        for p in u.get("top_procs", [])[:3]:
+            text += f"\n  {p['pid']} {p['rss_gb']}GB {p['cmd']}"
+        return text
+
     _probe_metric(
         remote_hosts,
         metric="mem",
         usage_store=host_health.mem_usage,
-        alerted_store=host_health.mem_alerted,
-        alert_ts_store=host_health.mem_alert_ts,
+        alert_state_store=host_health.mem_alert,
         cooldown=_res_cfg.mem_cooldown,
+        re_alert_interval=_res_cfg.mem_re_alert,
         is_critical_fn=lambda u: u["pct"] >= _res_cfg.mem_threshold_pct or u["avail_gb"] < _res_cfg.mem_threshold_gb,
         alert_fmt=_fmt,
+        re_alert_fmt=_re_fmt,
         recovery_fmt=lambda h, u: f"✅ Memory recovered: {h} — {u['pct']}% ({u['avail_gb']:.1f}GB available)",
         category="Memory",
     )
@@ -2575,11 +2591,13 @@ def _probe_io_all_hosts(remote_hosts: set[str]) -> None:
         remote_hosts,
         metric="io",
         usage_store=host_health.io_usage,
-        alerted_store=host_health.io_alerted,
-        alert_ts_store=host_health.io_alert_ts,
+        alert_state_store=host_health.io_alert,
         cooldown=_res_cfg.io_cooldown,
+        re_alert_interval=_res_cfg.io_re_alert,
         is_critical_fn=lambda u: u["iowait_pct"] >= _res_cfg.io_iowait_pct,
         alert_fmt=lambda h, u: f"⚡ IO critical: {h}\nIO wait: {u['iowait_pct']}%\nIOPS: {u['read_iops']}r + {u['write_iops']}w"
+        + (f" | disk util: {u['util_pct']}%" if u["util_pct"] else ""),
+        re_alert_fmt=lambda h, u, dur, n: f"⚡ IO STILL critical: {h} (for {_fmt_duration(dur)}, alert #{n + 1})\nIO wait: {u['iowait_pct']}%\nIOPS: {u['read_iops']}r + {u['write_iops']}w"
         + (f" | disk util: {u['util_pct']}%" if u["util_pct"] else ""),
         recovery_fmt=lambda h, u: f"✅ IO recovered: {h} — iowait {u['iowait_pct']}%, IOPS {u['read_iops']}r+{u['write_iops']}w",
         category="IO",
@@ -2618,15 +2636,23 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
             + "\n".join(f"  {it['size_gb']}GB — {it['path']}" for it in top)
         )
 
+    def _re_wt_fmt(h: str, u: dict[str, Any], dur: float, n: int) -> str:  # type: ignore[explicit-any]
+        top = sorted(u.get("items", []), key=lambda x: x["size_gb"], reverse=True)[:5]
+        return (
+            f"📁 Worktree STILL bloated: {h} (for {_fmt_duration(dur)}, alert #{n + 1})\n{u['total_gb']:.1f}GB total (threshold: {_res_cfg.worktree_threshold_gb}GB)\nTop directories:\n"
+            + "\n".join(f"  {it['size_gb']}GB — {it['path']}" for it in top)
+        )
+
     _probe_metric(
         remote_hosts,
         metric="worktree",
         usage_store=host_health.worktree_usage,
-        alerted_store=host_health.worktree_alerted,
-        alert_ts_store=host_health.worktree_alert_ts,
+        alert_state_store=host_health.worktree_alert,
         cooldown=_res_cfg.worktree_cooldown,
+        re_alert_interval=_res_cfg.worktree_re_alert,
         is_critical_fn=lambda u: u["total_gb"] >= _res_cfg.worktree_threshold_gb,
         alert_fmt=_fmt,
+        re_alert_fmt=_re_wt_fmt,
         recovery_fmt=lambda h, u: f"✅ Worktree size recovered: {h} — {u['total_gb']:.1f}GB (below {_res_cfg.worktree_threshold_gb}GB)",
         category="Worktree",
     )
@@ -10491,7 +10517,10 @@ def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
                 ensure_worker_pipe(name)
             host = info.get("host") or get_worker_host(name)
             if tmux_exists(tmux_name, host=host):
-                export_hook_env(tmux_name, backend_name, host=host)
+                try:
+                    export_hook_env(tmux_name, backend_name, host=host)
+                except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as exc:
+                    _log(_LOG_WARN, "bridge", f"export_hook_env failed for {name}: {exc}")
     return registered
 
 

@@ -1,6 +1,10 @@
 """Tests migrated from test.sh — health/watchdog category."""
 import pytest
 
+import bridge
+import shared
+from shared import _res_cfg
+
 
 @pytest.fixture(autouse=True)
 def _bridge_env(monkeypatch, tmp_path):
@@ -953,3 +957,214 @@ def test_health_alert_check_logs_fire_and_resolve(tmp_path):
         if shared._log_fh:
             shared._log_fh.close()
         shared._log_fh = orig_fh
+
+
+# --- ResourceAlertState unit tests ---
+
+
+class TestResourceAlertState:
+    def test_initial_state(self):
+        from claudecode import ResourceAlertState
+        s = ResourceAlertState()
+        assert not s.alerted
+        assert s.first_alert_ts == 0.0
+        assert s.last_alert_ts == 0.0
+        assert s.re_alert_count == 0
+
+    def test_fire_first_time(self):
+        from claudecode import ResourceAlertState
+        s = ResourceAlertState()
+        s.fire(1000.0)
+        assert s.alerted
+        assert s.first_alert_ts == 1000.0
+        assert s.last_alert_ts == 1000.0
+        assert s.re_alert_count == 0
+
+    def test_fire_subsequent_increments_count(self):
+        from claudecode import ResourceAlertState
+        s = ResourceAlertState()
+        s.fire(1000.0)
+        s.fire(1900.0)
+        assert s.re_alert_count == 1
+        assert s.first_alert_ts == 1000.0
+        assert s.last_alert_ts == 1900.0
+        s.fire(2800.0)
+        assert s.re_alert_count == 2
+
+    def test_recover_resets_all(self):
+        from claudecode import ResourceAlertState
+        s = ResourceAlertState()
+        s.fire(1000.0)
+        s.fire(1900.0)
+        s.recover()
+        assert not s.alerted
+        assert s.first_alert_ts == 0.0
+        assert s.re_alert_count == 0
+        assert s.last_alert_ts == 1900.0  # preserved for cooldown
+
+    def test_should_re_alert(self):
+        from claudecode import ResourceAlertState
+        s = ResourceAlertState()
+        s.fire(1000.0)
+        assert not s.should_re_alert(1000.0, 900)
+        assert not s.should_re_alert(1899.0, 900)
+        assert s.should_re_alert(1900.0, 900)
+        assert s.should_re_alert(2000.0, 900)
+
+    def test_should_re_alert_not_alerted(self):
+        from claudecode import ResourceAlertState
+        s = ResourceAlertState()
+        assert not s.should_re_alert(5000.0, 900)
+
+    def test_duration(self):
+        from claudecode import ResourceAlertState
+        s = ResourceAlertState()
+        assert s.duration(5000.0) == 0.0
+        s.fire(1000.0)
+        assert s.duration(1500.0) == 500.0
+
+
+# --- _probe_metric re-alerting integration tests ---
+
+
+class _FakeClock:
+    def __init__(self, t: float = 0.0):
+        self.t = t
+    def time(self) -> float:
+        return self.t
+    def sleep(self, s: float) -> None:
+        self.t += s
+    def advance(self, s: float) -> None:
+        self.t += s
+
+
+class TestProbeMetricReAlert:
+    """Tests _probe_metric re-alerting behavior end-to-end."""
+
+    def setup_method(self):
+        self.alerts: list[tuple[str, str]] = []
+        self.orig_alert = bridge._watchdog_alert
+        bridge._watchdog_alert = lambda cat, txt: self.alerts.append((cat, txt)) if txt else None
+
+        self.clock = _FakeClock(10000.0)
+        self.orig_clock_shared = shared._clock
+        self.orig_clock_bridge = bridge._clock
+        shared._clock = self.clock
+        bridge._clock = self.clock
+
+        self.orig_run_metric = bridge._run_metric
+        self.metric_value: dict | None = None
+        bridge._run_metric = lambda metric, host=None: self.metric_value
+
+        bridge.host_health.reset()
+
+    def teardown_method(self):
+        bridge._watchdog_alert = self.orig_alert
+        shared._clock = self.orig_clock_shared
+        bridge._clock = self.orig_clock_bridge
+        bridge._run_metric = self.orig_run_metric
+        bridge.host_health.reset()
+
+    def _probe_disk(self):
+        bridge._probe_disk_all_hosts(set())
+
+    def test_first_alert_fires(self):
+        self.metric_value = {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        self._probe_disk()
+        assert len(self.alerts) == 1
+        assert "critical" in self.alerts[0][1].lower()
+
+    def test_no_repeat_before_interval(self):
+        self.metric_value = {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        self._probe_disk()
+        assert len(self.alerts) == 1
+        self.clock.advance(800)
+        self._probe_disk()
+        assert len(self.alerts) == 1
+
+    def test_re_alert_after_interval(self):
+        self.metric_value = {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        self._probe_disk()
+        assert len(self.alerts) == 1
+        self.clock.advance(_res_cfg.disk_re_alert)
+        self._probe_disk()
+        assert len(self.alerts) == 2
+        assert "STILL" in self.alerts[1][1]
+        assert "alert #2" in self.alerts[1][1]
+
+    def test_multiple_re_alerts(self):
+        self.metric_value = {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        self._probe_disk()
+        for i in range(3):
+            self.clock.advance(_res_cfg.disk_re_alert)
+            self._probe_disk()
+        assert len(self.alerts) == 4
+        assert "alert #4" in self.alerts[3][1]
+
+    def test_recovery_after_re_alerts(self):
+        self.metric_value = {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        self._probe_disk()
+        self.clock.advance(_res_cfg.disk_re_alert)
+        self._probe_disk()
+        assert len(self.alerts) == 2
+        self.metric_value = {"pct": 50, "free_gb": 50.0, "total_gb": 100}
+        self._probe_disk()
+        assert len(self.alerts) == 3
+        assert "recovered" in self.alerts[2][1].lower()
+
+    def test_re_alert_shows_duration(self):
+        self.metric_value = {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        self._probe_disk()
+        self.clock.advance(3600)
+        self._probe_disk()
+        assert "1h0m" in self.alerts[1][1]
+
+    def test_no_alert_when_below_threshold(self):
+        self.metric_value = {"pct": 50, "free_gb": 50.0, "total_gb": 100}
+        self._probe_disk()
+        assert len(self.alerts) == 0
+
+    def test_cooldown_prevents_rapid_first_alert(self):
+        self.metric_value = {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        self._probe_disk()
+        assert len(self.alerts) == 1
+        # Recover
+        self.metric_value = {"pct": 50, "free_gb": 50.0, "total_gb": 100}
+        self._probe_disk()
+        assert len(self.alerts) == 2
+        # Go critical again immediately — cooldown blocks
+        self.metric_value = {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        self._probe_disk()
+        assert len(self.alerts) == 2
+        # After cooldown — fires
+        self.clock.advance(_res_cfg.disk_cooldown)
+        self._probe_disk()
+        assert len(self.alerts) == 3
+
+    def test_state_isolated_per_host(self):
+        self.metric_value = {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        self._probe_disk()
+        assert len(self.alerts) == 1
+        state_vps = bridge.host_health.disk_alert.get("VPS")
+        assert state_vps is not None
+        assert state_vps.alerted
+
+
+class TestFmtDuration:
+    def test_seconds(self):
+        assert bridge._fmt_duration(30) == "30s"
+
+    def test_minutes(self):
+        assert bridge._fmt_duration(300) == "5m0s"
+        assert bridge._fmt_duration(330) == "5m30s"
+
+    def test_hours(self):
+        assert bridge._fmt_duration(3600) == "1h0m"
+        assert bridge._fmt_duration(7200) == "2h0m"
+
+    def test_hours_and_minutes(self):
+        assert bridge._fmt_duration(3660) == "1h1m"
+        assert bridge._fmt_duration(5400) == "1h30m"
+
+    def test_zero(self):
+        assert bridge._fmt_duration(0) == "0s"

@@ -1,5 +1,15 @@
 ## Changelog
 
+### v0.52.1 - Resource alert re-alerting
+
+**Bug fix:** Resource alerts (disk, memory, IO, worktree) fired once and never repeated while the condition stayed critical. Manager missed the single disk-full alert among normal traffic.
+
+**Changes:**
+- `ResourceAlertState` strongly-typed class replaces separate `alerted: dict[str, bool]` + `alert_ts: dict[str, float]` per metric. Tracks `alerted`, `first_alert_ts`, `last_alert_ts`, `re_alert_count`.
+- `_probe_metric()` re-alerts every 15 minutes (configurable `*_re_alert` in `ResourceAlertConfig`) while condition stays critical. Re-alerts show duration and escalation count.
+- `bridge-watchdog.sh` now independently checks disk thresholds (95% or <5GB free) every 2 minutes via cron — safety net that works even if the bridge's own alerting fails.
+- 21 new tests: `ResourceAlertState` unit tests + `_probe_metric` re-alerting integration tests + `_fmt_duration` tests.
+
 ### v0.52.0 - Structured logging, health observability, log rotation [SPEC-031]
 
 **Structured logging:**

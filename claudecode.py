@@ -215,6 +215,38 @@ class LearningReminderState:
         self.idle_scan_timer: threading.Timer | None = None
 
 
+class ResourceAlertState:
+    """Strongly-typed per-host, per-metric alert state for re-alerting."""
+
+    __slots__ = ("alerted", "first_alert_ts", "last_alert_ts", "re_alert_count")
+
+    def __init__(self) -> None:
+        self.alerted: bool = False
+        self.first_alert_ts: float = 0.0
+        self.last_alert_ts: float = 0.0
+        self.re_alert_count: int = 0
+
+    def fire(self, now: float) -> None:
+        if not self.alerted:
+            self.first_alert_ts = now
+            self.re_alert_count = 0
+        else:
+            self.re_alert_count += 1
+        self.alerted = True
+        self.last_alert_ts = now
+
+    def recover(self) -> None:
+        self.alerted = False
+        self.first_alert_ts = 0.0
+        self.re_alert_count = 0
+
+    def should_re_alert(self, now: float, re_alert_interval: float) -> bool:
+        return self.alerted and (now - self.last_alert_ts >= re_alert_interval)
+
+    def duration(self, now: float) -> float:
+        return now - self.first_alert_ts if self.alerted else 0.0
+
+
 class HostHealthState:
     def __init__(self) -> None:
         self.ssh_failures: dict[str, int] = {}
@@ -222,19 +254,15 @@ class HostHealthState:
         self.down_since: dict[str, float] = {}
         self.last_error: dict[str, str] = {}
         self.disk_usage: dict[str, DiskUsageDict] = {}
-        self.disk_alert_ts: dict[str, float] = {}
-        self.disk_alerted: dict[str, str | bool] = {}
+        self.disk_alert: dict[str, ResourceAlertState] = {}
         self.cpu_hogs: dict[str, list[CpuHogEntry]] = {}
         self.cpu_hog_alert_ts: dict[str, float] = {}
         self.worktree_usage: dict[str, WorktreeUsageDict] = {}
-        self.worktree_alert_ts: dict[str, float] = {}
-        self.worktree_alerted: dict[str, bool] = {}
+        self.worktree_alert: dict[str, ResourceAlertState] = {}
         self.mem_usage: dict[str, MemUsageDict] = {}
-        self.mem_alert_ts: dict[str, float] = {}
-        self.mem_alerted: dict[str, bool] = {}
+        self.mem_alert: dict[str, ResourceAlertState] = {}
         self.io_usage: dict[str, IoUsageDict] = {}
-        self.io_alert_ts: dict[str, float] = {}
-        self.io_alerted: dict[str, bool] = {}
+        self.io_alert: dict[str, ResourceAlertState] = {}
         self.tailscale_down: bool = False
         self.tailscale_alert_ts: float = 0.0
 

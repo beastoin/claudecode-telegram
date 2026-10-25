@@ -1066,16 +1066,20 @@ class ResourceAlertConfig:
     disk_alert_pct: int = 95
     disk_alert_gb: int = 5
     disk_cooldown: int = 3600
+    disk_re_alert: int = 900
     cpu_hog_pct: int = 90
     cpu_hog_duration_min: int = 60
     cpu_hog_cooldown: int = 3600
     worktree_threshold_gb: int = 30
     worktree_cooldown: int = 3600
+    worktree_re_alert: int = 900
     mem_threshold_pct: int = 90
     mem_threshold_gb: int = 4
     mem_cooldown: int = 3600
+    mem_re_alert: int = 900
     io_iowait_pct: int = 30
     io_cooldown: int = 3600
+    io_re_alert: int = 900
     infra_cooldown: int = 300
 
 

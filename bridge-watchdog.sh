@@ -360,6 +360,26 @@ print(', '.join(bad) if bad else '')
     exit 0
 fi
 
+# Check 4: Independent disk threshold alert (safety net — fires even if bridge alerting fails)
+DISK_PCT=$(df --output=pcent / 2>/dev/null | tail -1 | tr -d ' %' || echo "0")
+DISK_FREE_GB=$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -d ' G' || echo "999")
+DISK_THRESHOLD=95
+DISK_FREE_MIN=5
+DISK_COOLDOWN_FILE="$STATE_DIR/.watchdog-disk-alert-ts"
+if [[ "$DISK_PCT" -ge "$DISK_THRESHOLD" ]] || [[ "$DISK_FREE_GB" -le "$DISK_FREE_MIN" ]]; then
+    DISK_TOTAL=$(df -BG --output=size / 2>/dev/null | tail -1 | tr -d ' G' || echo "?")
+    NOW=$(date +%s)
+    LAST_DISK_ALERT=0
+    [[ -f "$DISK_COOLDOWN_FILE" ]] && LAST_DISK_ALERT=$(cat "$DISK_COOLDOWN_FILE" 2>/dev/null || echo 0)
+    DISK_RE_ALERT=900
+    if (( NOW - LAST_DISK_ALERT >= DISK_RE_ALERT )); then
+        echo "$NOW" > "$DISK_COOLDOWN_FILE"
+        send_alert "🔴 [watchdog] Disk critical: ${DISK_PCT}% used (${DISK_FREE_GB}GB free of ${DISK_TOTAL}GB)"
+    fi
+elif [[ -f "$DISK_COOLDOWN_FILE" ]]; then
+    rm -f "$DISK_COOLDOWN_FILE" 2>/dev/null || true
+fi
+
 # All OK — log heartbeat
 VERSION=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version','?'))" 2>/dev/null || echo "?")
 UPTIME=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('uptime_s','?'))" 2>/dev/null || echo "?")
