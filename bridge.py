@@ -716,6 +716,7 @@ class BaseConnector[M](abc.ABC):
         self._handler_error_alerted: bool = False
         self._alert_sent: bool = False
         self._alert_ref: str = ""
+        self._last_error: str = ""
         self._lock: threading.RLock = threading.RLock()
 
     @abc.abstractmethod
@@ -835,18 +836,24 @@ class BaseConnector[M](abc.ABC):
         if was_alerted:
             tag = f"[{self.connector_name}]"
             ref_tag = f" ref:{ref}" if ref else ""
+            _alert_log_append("resolve", f"connector:{self.connector_name}", ref=ref)
             if self.on_alert:
                 try:
                     self.on_alert(f"{tag} Recovered — polling resumed{ref_tag}")
                 except Exception as e:
                     _log(_LOG_WARN, self.connector_name, f"Failed to send recovery alert: {e}")
 
-    def track_failure(self) -> None:
+    def track_failure(self, error: str = "") -> None:
         with self._lock:
             self._consecutive_failures += 1
+            if error:
+                self._last_error = error
             should_alert = self._consecutive_failures >= CONSECUTIVE_FAIL_WARN and not self._alert_sent
+            count = self._consecutive_failures
+            last_err = getattr(self, "_last_error", "")
         if should_alert:
-            self._send_alert(f"Polling failing ({self._consecutive_failures} consecutive errors)")
+            detail = f"\nLast error: {last_err}" if last_err else ""
+            self._send_alert(f"Polling failing ({count} consecutive errors){detail}")
 
     def track_success(self) -> None:
         with self._lock:
@@ -900,7 +907,7 @@ class BaseConnector[M](abc.ABC):
                 self.poll_once()
             except Exception as e:
                 _log(_LOG_ERROR, self.connector_name, f"Poll error: {e}")
-                self.track_failure()
+                self.track_failure(error=str(e))
             self._stop_event.wait(self.poll_interval)
 
 
@@ -1410,7 +1417,7 @@ class GmailConnector(BaseConnector[GmailMessage]):
     def poll_once(self) -> None:
         msg_ids, new_hid = self._get_new_message_ids()
         if msg_ids is None:
-            self.track_failure()
+            self.track_failure(error="history.list returned None")
             with self._lock:
                 fail_count = self._consecutive_failures
             if fail_count >= CONSECUTIVE_FAIL_REBOOTSTRAP:
@@ -1953,7 +1960,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
             return
         all_comments, fetch_complete = self._get_all_comments(poll_time)
         if all_comments is None:
-            self.track_failure()
+            self.track_failure(error="comment fetch returned None")
             return
         self.track_success()
         had_errors: bool = False
@@ -2666,6 +2673,8 @@ def _probe_metric(  # type: ignore[explicit-any]
             continue
         is_crit = is_critical_fn(usage)
         alert_text = None
+        log_event = ""
+        prev_ref = ""
         with watchdog.lock:
             usage_store[host_label] = {**usage, "ts": now}
             state = alert_state_store.get(host_label)
@@ -2675,16 +2684,37 @@ def _probe_metric(  # type: ignore[explicit-any]
             if is_crit and not state.alerted:
                 if now - state.last_alert_ts >= cooldown:
                     alert_text = alert_fmt(host_label, usage)
+                    log_event = "fire"
                     state.fire(now)
             elif is_crit and state.should_re_alert(now, re_alert_interval):
                 dur = state.duration(now)
                 count = state.re_alert_count + 1
                 alert_text = re_alert_fmt(host_label, usage, dur, count)
+                log_event = "re-alert"
+                prev_ref = state.ref
                 state.fire(now)
             elif not is_crit and state.alerted:
+                prev_ref = state.ref
                 state.recover()
                 alert_text = recovery_fmt(host_label, usage)
-        _watchdog_alert(category, alert_text)
+                log_event = "resolve"
+        if alert_text:
+            alert_key = f"{metric}:{host_label}"
+            if log_event == "fire":
+                eid = _alert_log_append("fire", alert_key, desc=alert_text.splitlines()[0])
+                ref = eid[:6]
+                with watchdog.lock:
+                    state.ref = ref
+                alert_text += f"\nref:{ref}"
+            elif log_event == "re-alert":
+                _alert_log_append("re-alert", alert_key, desc=alert_text.splitlines()[0], ref=prev_ref)
+                if prev_ref:
+                    alert_text += f"\nref:{prev_ref}"
+            elif log_event == "resolve":
+                _alert_log_append("resolve", alert_key, desc=alert_text.splitlines()[0], ref=prev_ref)
+                if prev_ref:
+                    alert_text += f"\nref:{prev_ref}"
+            _watchdog_alert(category, alert_text)
 
 
 def _probe_disk_all_hosts(remote_hosts: set[str]) -> None:
@@ -2770,6 +2800,7 @@ def _probe_cpu_hogs(remote_hosts: set[str]) -> None:
             _watchdog_alert(
                 "CPU hog",
                 f"🔥 Runaway process{'es' if len(real_hogs) > 1 else ''} on {host_label}:\n" + "\n".join(lines),
+                key=f"cpuhog:{host_label}",
             )
 
 
@@ -2808,16 +2839,32 @@ def _probe_tailscale() -> None:
     result = _run_metric("tailscale")
     is_up = isinstance(result, dict) and result.get("up", False)
     alert_text = None
+    log_event = ""
     with watchdog.lock:
         if not is_up and not host_health.tailscale_down:
             if now - host_health.tailscale_alert_ts >= _res_cfg.infra_cooldown:
                 host_health.tailscale_down = True
                 host_health.tailscale_alert_ts = now
                 alert_text = "🚨 Tailscale is DOWN on VPS — 100.125.36.102 unreachable from external network.\nRun: sudo tailscale up"
+                log_event = "fire"
         elif is_up and host_health.tailscale_down:
             host_health.tailscale_down = False
             alert_text = "✅ Tailscale recovered — VPS reachable at 100.125.36.102"
-    _watchdog_alert("Tailscale", alert_text)
+            log_event = "resolve"
+    if alert_text:
+        if log_event == "fire":
+            eid = _alert_log_append("fire", "tailscale:VPS", desc=alert_text.splitlines()[0])
+            alert_text += f"\nref:{eid[:6]}"
+            with watchdog.lock:
+                host_health.tailscale_ref = eid[:6]
+        elif log_event == "resolve":
+            with watchdog.lock:
+                prev_ref = getattr(host_health, "tailscale_ref", "")
+                host_health.tailscale_ref = ""
+            _alert_log_append("resolve", "tailscale:VPS", desc=alert_text.splitlines()[0], ref=prev_ref)
+            if prev_ref:
+                alert_text += f"\nref:{prev_ref}"
+        _watchdog_alert("Tailscale", alert_text)
 
 
 # Bridge proxy helpers removed — real definitions later in this file
@@ -3083,10 +3130,13 @@ def _emit_alert(text: str, *, tag: str = "alert", edit_msg_id: int | None = None
 
 
 # --- Watchdog alerting ---
-def _watchdog_alert(category: str, text: str | None) -> None:
+def _watchdog_alert(category: str, text: str | None, *, key: str = "") -> None:
     if not text:
         return
     _log(_LOG_WARN, "watchdog", f"{category}: {text.splitlines()[0]}")
+    if key:
+        eid = _alert_log_append("fire", key, desc=text.splitlines()[0])
+        text += f"\nref:{eid[:6]}"
     _emit_alert(text, tag="watchdog")
 
 
@@ -3305,6 +3355,7 @@ _JSONL_STALE_THRESHOLD = 300  # 5 minutes — BUSY worker JSONL should update mo
 _JSONL_STALE_ALERT_COOLDOWN = 600  # 10 minutes between re-alerts per worker
 _jsonl_stale_last_alert: dict[str, float] = {}
 _jsonl_stale_alerted: set[str] = set()
+_jsonl_stale_refs: dict[str, str] = {}  # name -> 6-char ref ID
 
 
 def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> None:
@@ -3320,7 +3371,14 @@ def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> N
         with watchdog.lock:
             entry = watchdog.worker_states.get(name)
         if not entry or entry[0] not in busy_states:
-            _jsonl_stale_alerted.discard(name)
+            if name in _jsonl_stale_alerted:
+                ref = _jsonl_stale_refs.pop(name, "")
+                _jsonl_stale_alerted.discard(name)
+                _alert_log_append("resolve", f"jsonl:{name}", ref=ref)
+                ref_tag = f"\nref:{ref}" if ref else ""
+                _emit_alert(
+                    f"✅ {name}: transcript recording resumed (worker no longer busy){ref_tag}", tag="jsonl-stale"
+                )
             continue
         busy_duration = now - entry[2]
         if busy_duration < _JSONL_STALE_THRESHOLD:
@@ -3337,7 +3395,12 @@ def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> N
         except (OSError, ValueError):
             continue
         if age < _JSONL_STALE_THRESHOLD:
-            _jsonl_stale_alerted.discard(name)
+            if name in _jsonl_stale_alerted:
+                ref = _jsonl_stale_refs.pop(name, "")
+                _jsonl_stale_alerted.discard(name)
+                _alert_log_append("resolve", f"jsonl:{name}", ref=ref)
+                ref_tag = f"\nref:{ref}" if ref else ""
+                _emit_alert(f"✅ {name}: transcript recording resumed{ref_tag}", tag="jsonl-stale")
             continue
         last_alert = _jsonl_stale_last_alert.get(name, 0)
         if now - last_alert < _JSONL_STALE_ALERT_COOLDOWN:
@@ -3357,6 +3420,7 @@ def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> N
         if result and result.get("ok"):
             _jsonl_stale_last_alert[name] = now
             _jsonl_stale_alerted.add(name)
+            _jsonl_stale_refs[name] = eid[:6]
             _log(_LOG_WARN, "watchdog", f"JSONL stale alert for {name}: age={int(age)}s, busy={int(busy_duration)}s")
 
 
@@ -10440,7 +10504,7 @@ def _health_alert_check() -> None:
     if active_changed:
         _alerts_active_save()
     if to_send:
-        _send_health_alert("\n".join(to_send))
+        _emit_alert("\n".join(to_send), tag="health")
 
 
 def _fmt_duration(seconds: float) -> str:

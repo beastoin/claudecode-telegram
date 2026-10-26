@@ -219,13 +219,14 @@ class LearningReminderState:
 class ResourceAlertState:
     """Strongly-typed per-host, per-metric alert state for re-alerting."""
 
-    __slots__ = ("alerted", "first_alert_ts", "last_alert_ts", "re_alert_count")
+    __slots__ = ("alerted", "first_alert_ts", "last_alert_ts", "re_alert_count", "ref")
 
     def __init__(self) -> None:
         self.alerted: bool = False
         self.first_alert_ts: float = 0.0
         self.last_alert_ts: float = 0.0
         self.re_alert_count: int = 0
+        self.ref: str = ""
 
     def fire(self, now: float) -> None:
         if not self.alerted:
@@ -240,6 +241,7 @@ class ResourceAlertState:
         self.alerted = False
         self.first_alert_ts = 0.0
         self.re_alert_count = 0
+        self.ref = ""
 
     def should_re_alert(self, now: float, re_alert_interval: float) -> bool:
         return self.alerted and (now - self.last_alert_ts >= re_alert_interval)
@@ -266,6 +268,7 @@ class HostHealthState:
         self.io_alert: dict[str, ResourceAlertState] = {}
         self.tailscale_down: bool = False
         self.tailscale_alert_ts: float = 0.0
+        self.tailscale_ref: str = ""
         self.alert_refs: dict[str, str] = {}  # host -> 6-char ref ID
 
     def reset(self) -> None:

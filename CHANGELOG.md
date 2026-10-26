@@ -1,5 +1,27 @@
 ## Changelog
 
+### v0.52.11 - Close 6 alert system gaps from full audit
+
+Full audit of 9 alert paths against 7 quality criteria. Fixed all identified gaps:
+
+**GAP-1 (highest leverage):** Resource alerts (disk, memory, IO, worktree, CPU hogs, tailscale) now get structured logging via `_alert_log_append` and ref IDs. Previously `_watchdog_alert` bypassed structured logging entirely — 5 of 9 alert types were invisible to bridge.log JSONL.
+
+**GAP-2:** Connector resolve events now logged. `_clear_alert()` calls `_alert_log_append("resolve", ...)` so Gmail/GitHub recovery events appear in bridge.log alongside their fire events.
+
+**GAP-3:** JSONL staleness alerts now have resolve messages. When transcript recording resumes (JSONL becomes fresh or worker stops being busy), a "✅ transcript recording resumed" message is sent with the original ref ID.
+
+**GAP-4:** Health signal fire/escalate alerts now reach Telegram admin. Changed from `_send_health_alert` (workers only) to `_emit_alert` (admin + relay + workers). Thread deaths and pool saturation are high-severity — they belong in admin's Telegram.
+
+**GAP-5:** CPU hog alerts now carry ref IDs via `_watchdog_alert(key=...)`.
+
+**GAP-6:** Connector fire messages now include last error detail. `track_failure(error=...)` stores the error and appends it to the alert text so the manager can diagnose without checking bridge.log.
+
+**Supporting changes:**
+- `ResourceAlertState` gains `ref` field for tracking ref ID across fire→re-alert→recovery lifecycle
+- `HostHealthState` gains `tailscale_ref` field
+- `_jsonl_stale_refs` dict tracks per-worker JSONL staleness ref IDs
+- 10 new tests covering all 6 gaps, 364 FAST total, 0 failures
+
 ### v0.52.10 - Alert reference IDs for incident tracking
 
 Every alert now carries a `ref:<hex>` tag — a 6-character ID that links the firing alert to its resolution. The same ref appears on both fire and resolve messages so incidents are traceable end-to-end.

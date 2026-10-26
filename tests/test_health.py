@@ -1384,14 +1384,18 @@ class TestJsonlStalenessCheck:
         monkeypatch.setattr(bridge._clock, "time", lambda: now)
         # Fire initial alert
         with patch.object(bridge, "_emit_alert", return_value={"ok": True}), \
-             patch.object(bridge, "_alert_log_append"):
+             patch.object(bridge, "_alert_log_append", return_value="abc123def456"):
             bridge._watchdog_jsonl_staleness_check({"clearw": {}})
         assert "clearw" in bridge._jsonl_stale_alerted
-        # Now JSONL becomes fresh
+        # Now JSONL becomes fresh — should send resolve
         os.utime(str(jsonl_file), (now - 10, now - 10))
-        with patch.object(bridge, "_emit_alert") as mock_emit:
+        with patch.object(bridge, "_emit_alert") as mock_emit, \
+             patch.object(bridge, "_alert_log_append") as mock_log:
             bridge._watchdog_jsonl_staleness_check({"clearw": {}})
         assert "clearw" not in bridge._jsonl_stale_alerted
+        mock_emit.assert_called_once()
+        assert "resumed" in mock_emit.call_args[0][0]
+        mock_log.assert_called_once_with("resolve", "jsonl:clearw", ref="abc123")
         self._cleanup_jsonl_state()
 
 
@@ -1621,3 +1625,181 @@ class TestWatchdogHealthSignalTiming:
         # Should only call _ps_stats for local host (None), not dead-host
         assert None in ps_stats_calls, "local _ps_stats not called"
         assert "dead-host" not in ps_stats_calls, "_ps_stats called for dead-host — should be skipped"
+
+
+# ── Alert gap fixes (v0.52.11) ──────────────────────────────────────
+
+class TestResourceAlertRefIds:
+    """GAP-1: Resource alerts (disk/mem/IO/worktree) get structured logging and ref IDs."""
+
+    def setup_method(self):
+        self.emit_calls: list[str] = []
+        self.log_calls: list[tuple] = []
+        self.clock = _FakeClock(10000.0)
+        self._orig_clock_shared = shared._clock
+        self._orig_clock_bridge = bridge._clock
+        shared._clock = self.clock
+        bridge._clock = self.clock
+        self._orig_emit = bridge._emit_alert
+        self._orig_log = bridge._alert_log_append
+        self._orig_run = bridge._run_metric
+        bridge._emit_alert = lambda text, **kw: (self.emit_calls.append(text), {"ok": True, "result": {"message_id": 1}})[1]
+        bridge._alert_log_append = lambda event, key, **kw: (self.log_calls.append((event, key, kw)), f"{event[:4]}{key[:6]}00")[1]
+        bridge.host_health.reset()
+
+    def teardown_method(self):
+        shared._clock = self._orig_clock_shared
+        bridge._clock = self._orig_clock_bridge
+        bridge._emit_alert = self._orig_emit
+        bridge._alert_log_append = self._orig_log
+        bridge._run_metric = self._orig_run
+        bridge.host_health.reset()
+
+    def test_disk_fire_has_ref(self):
+        bridge._run_metric = lambda metric, host=None: {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        bridge._probe_disk_all_hosts(set())
+        fire_calls = [c for c in self.log_calls if c[0] == "fire"]
+        assert len(fire_calls) == 1
+        assert fire_calls[0][1] == "disk:VPS"
+        assert any("ref:" in t for t in self.emit_calls)
+
+    def test_disk_recovery_has_resolve_log(self):
+        bridge._run_metric = lambda metric, host=None: {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        bridge._probe_disk_all_hosts(set())
+        bridge._run_metric = lambda metric, host=None: {"pct": 50, "free_gb": 50.0, "total_gb": 100}
+        bridge._probe_disk_all_hosts(set())
+        resolve_calls = [c for c in self.log_calls if c[0] == "resolve"]
+        assert len(resolve_calls) == 1
+        assert resolve_calls[0][1] == "disk:VPS"
+
+    def test_disk_re_alert_carries_same_ref(self):
+        bridge._run_metric = lambda metric, host=None: {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        bridge._probe_disk_all_hosts(set())
+        self.clock.advance(_res_cfg.disk_re_alert)
+        bridge._probe_disk_all_hosts(set())
+        re_alert_calls = [c for c in self.log_calls if c[0] == "re-alert"]
+        assert len(re_alert_calls) == 1
+        assert "ref" in re_alert_calls[0][2]
+
+    def test_ref_stored_in_resource_alert_state(self):
+        bridge._run_metric = lambda metric, host=None: {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        bridge._probe_disk_all_hosts(set())
+        state = bridge.host_health.disk_alert.get("VPS")
+        assert state is not None
+        assert state.ref != ""
+
+    def test_ref_cleared_on_recovery(self):
+        bridge._run_metric = lambda metric, host=None: {"pct": 98, "free_gb": 2.0, "total_gb": 100}
+        bridge._probe_disk_all_hosts(set())
+        bridge._run_metric = lambda metric, host=None: {"pct": 50, "free_gb": 50.0, "total_gb": 100}
+        bridge._probe_disk_all_hosts(set())
+        state = bridge.host_health.disk_alert.get("VPS")
+        assert state is not None
+        assert state.ref == ""
+
+
+class TestConnectorResolveLogged:
+    """GAP-2: Connector _clear_alert logs resolve event."""
+
+    def test_resolve_calls_alert_log_append(self):
+        from unittest.mock import patch, MagicMock
+        connector = MagicMock(spec=bridge.BaseConnector)
+        connector._lock = __import__("threading").RLock()
+        connector._alert_sent = True
+        connector._alert_ref = "abc123"
+        connector.connector_name = "test-gmail"
+        connector.on_alert = MagicMock()
+        with patch.object(bridge, "_alert_log_append") as mock_log:
+            bridge.BaseConnector._clear_alert(connector)
+        mock_log.assert_called_once_with("resolve", "connector:test-gmail", ref="abc123")
+
+    def test_resolve_not_logged_when_no_alert(self):
+        from unittest.mock import patch, MagicMock
+        connector = MagicMock(spec=bridge.BaseConnector)
+        connector._lock = __import__("threading").RLock()
+        connector._alert_sent = False
+        connector._alert_ref = ""
+        connector.connector_name = "test-github"
+        connector.on_alert = MagicMock()
+        with patch.object(bridge, "_alert_log_append") as mock_log:
+            bridge.BaseConnector._clear_alert(connector)
+        mock_log.assert_not_called()
+
+
+class TestConnectorErrorDetail:
+    """GAP-6: Connector fire message includes last error."""
+
+    def test_track_failure_includes_error(self):
+        from unittest.mock import patch, MagicMock
+        connector = MagicMock(spec=bridge.BaseConnector)
+        connector._lock = __import__("threading").RLock()
+        connector._consecutive_failures = 0
+        connector._alert_sent = False
+        connector._last_error = ""
+        connector._send_alert = MagicMock()
+        # Accumulate failures until alert threshold
+        for i in range(bridge.CONSECUTIVE_FAIL_WARN):
+            bridge.BaseConnector.track_failure(connector, error="timeout after 30s")
+        connector._send_alert.assert_called_once()
+        alert_text = connector._send_alert.call_args[0][0]
+        assert "timeout after 30s" in alert_text
+
+
+class TestHealthSignalReachesAdmin:
+    """GAP-4: Health signal alerts use _emit_alert (reaches Telegram admin)."""
+
+    def test_fire_uses_emit_alert(self):
+        from unittest.mock import patch, MagicMock
+        orig_alert_workers = bridge.ALERT_WORKERS
+        orig_channel = bridge._health_channel_id
+        bridge.ALERT_WORKERS = True
+        bridge._health_channel_id = "test-channel"
+        try:
+            fake_snap = {
+                "signals": {"watchdog": {"ok": False, "last_ok_ago_s": 30, "errors": 5}},
+                "threads": {},
+                "pools": {},
+            }
+            with patch.object(bridge.health, "snapshot", return_value=fake_snap), \
+                 patch.object(bridge, "_emit_alert") as mock_emit, \
+                 patch.object(bridge, "_alert_log_append", return_value="test12345678"), \
+                 patch.object(bridge, "_alerts_active_save"):
+                bridge._alert_active.clear()
+                bridge._alert_last_sent.clear()
+                bridge._alert_refs.clear()
+                bridge._health_alert_check()
+            mock_emit.assert_called_once()
+            assert "watchdog" in mock_emit.call_args[0][0]
+        finally:
+            bridge.ALERT_WORKERS = orig_alert_workers
+            bridge._health_channel_id = orig_channel
+            bridge._alert_active.clear()
+            bridge._alert_last_sent.clear()
+            bridge._alert_refs.clear()
+
+
+class TestCpuHogRefId:
+    """GAP-1 (CPU hogs): CPU hog alerts get ref IDs via _watchdog_alert key param."""
+
+    def test_cpu_hog_passes_key(self):
+        from unittest.mock import patch
+        watchdog_calls: list[dict] = []
+        orig_watchdog_alert = bridge._watchdog_alert
+
+        def capture_watchdog_alert(cat, txt, *, key=""):
+            watchdog_calls.append({"cat": cat, "text": txt, "key": key})
+
+        bridge._watchdog_alert = capture_watchdog_alert
+        bridge._run_metric = lambda metric, host=None: [
+            {"pid": 1234, "cpu": 95.0, "etime_min": 120, "cmd": "stress"}
+        ] if metric == "cpu_hogs" else None
+        bridge.host_health.cpu_hog_alert_ts.clear()
+        bridge.host_health.cpu_hogs.clear()
+        try:
+            bridge._probe_cpu_hogs(set())
+            assert len(watchdog_calls) == 1
+            assert watchdog_calls[0]["key"] == "cpuhog:VPS"
+        finally:
+            bridge._watchdog_alert = orig_watchdog_alert
+            bridge.host_health.cpu_hog_alert_ts.clear()
+            bridge.host_health.cpu_hogs.clear()
