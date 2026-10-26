@@ -1,5 +1,37 @@
 ## Changelog
 
+### v0.52.8 - Skip downed hosts in watchdog SSH probes + SIGUSR1 safety
+
+**Root cause of watchdog stall:** `_watchdog_probe_remote_hosts()` made SSH calls to ALL remote hosts every cycle, even those already marked DOWN via `host_health.down[host]`. Each SSH timeout blocks ~10s. With 4+ SSH calls per host per cycle (probe, _get_claude_pid per worker, _ps_stats, _capture_pane_text), total blocking exceeded 7 minutes — the watchdog couldn't complete its cycle.
+
+**Fix — skip downed hosts with periodic re-probe:**
+- `_watchdog_probe_remote_hosts()` checks `_is_host_down(host)` before SSH calls. Downed hosts are added to `failed_hosts` immediately with no SSH call.
+- Periodic re-probe: every `HOST_REPROBE_INTERVAL` (20s, configurable via `WatchdogConfig`), a single SSH probe is attempted to downed hosts. On success, `_record_host_probe(host, ok=True)` marks the host UP and emits the recovery alert. On failure, the host stays DOWN and the next re-probe waits another 20s.
+- Downstream functions (`_watchdog_collect_worker_pids`, `_watchdog_gather_cpu_stats`, `_watchdog_evaluate_workers`) naturally skip downed hosts: workers on skipped hosts have no pane_pid data, so no SSH calls are made.
+- `_host_last_reprobe` cleanup on host recovery (prevents stale timestamps).
+
+**Fix — SIGUSR1 thread dump instead of process death:**
+- Python's default SIGUSR1 handler is SIG_DFL (terminate). Sending SIGUSR1 to the bridge killed it silently — no traceback, no logs.
+- Now: SIGUSR1 dumps all thread stacks to the log via `sys._current_frames()`. Safe diagnostic tool for stuck watchdog debugging.
+
+**Audit:** All 64 `_remote_run()` call sites traced:
+- **HIGH (fixed):** `_watchdog_probe_remote_hosts` — downed host skip + re-probe.
+- **Already safe:** `_watchdog_gather_cpu_stats` (skips failed_hosts, v0.52.7), `_watchdog_evaluate_workers` (checks `_is_host_down`), `_watchdog_refine_state` (guarded upstream).
+- **MEDIUM (acceptable):** `scan_tmux_sessions`, `cmd_team` — serial SSH per host but runs in 8-thread msg-N pool (on-demand, not recurring loop).
+- **LOW:** Teleport, restart, interactive reply — one-shot operations in dedicated threads.
+
+5 new tests, 364 FAST pass.
+
+### v0.52.7 - Watchdog health signal decoupled from SSH probes
+
+**Root cause:** `health.ok("watchdog")` fired at the END of the watchdog cycle, after all remote SSH probes completed. When a remote host had slow/failing SSH (e.g., Tailscale relay hiccup), each probe blocked for up to 5s. During the 3-cycle ramp to `HOST_DOWN_THRESHOLD`, the health signal went stale — external watchdog saw the bridge as unhealthy even though the bridge was fine.
+
+**Fix:**
+- `health.ok("watchdog")` now fires BEFORE remote host probes (after local tmux checks complete). A second `health.ok("watchdog")` still fires at cycle end. SSH timeouts can no longer stall the health signal.
+- `_watchdog_gather_cpu_stats()` now accepts `failed_hosts` and skips `_ps_stats` SSH calls to hosts already known to be unreachable in the current cycle.
+
+2 new tests, 364 FAST pass.
+
 ### v0.52.6 - Bridge-side JSONL staleness detection
 
 **Feature:** Proactive transcript health monitoring. The bridge watchdog now checks JSONL transcript freshness for all BUSY workers every ~80 seconds (20 watchdog cycles). If a worker has been busy for >5 minutes and its JSONL transcript file hasn't been updated, the manager gets an alert — the inotify/kqueue file watcher likely died.

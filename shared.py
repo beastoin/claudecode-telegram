@@ -656,7 +656,7 @@ class RelayChannelDict(TypedDict):
 
 # --- Core ---
 
-VERSION = "0.52.6"
+VERSION = "0.52.7"
 
 
 def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:
@@ -1069,6 +1069,7 @@ class WatchdogConfig:
     alert_cooldown: int = 180
     restart_cooldown: int = 60
     host_down_threshold: int = 3
+    host_reprobe_interval: int = 20
 
 
 @dataclass(frozen=True)
@@ -1160,6 +1161,7 @@ IO_IOWAIT_PCT = _res_cfg.io_iowait_pct
 IO_COOLDOWN = _res_cfg.io_cooldown
 INFRA_COOLDOWN = _res_cfg.infra_cooldown
 HOST_DOWN_THRESHOLD = _wd_cfg.host_down_threshold
+HOST_REPROBE_INTERVAL = _wd_cfg.host_reprobe_interval
 TRANSPORT_MODE = os.environ.get("TRANSPORT_MODE", "telegram")
 
 

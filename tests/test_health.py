@@ -1393,3 +1393,231 @@ class TestJsonlStalenessCheck:
             bridge._watchdog_jsonl_staleness_check({"clearw": {}})
         assert "clearw" not in bridge._jsonl_stale_alerted
         self._cleanup_jsonl_state()
+
+
+class TestWatchdogHostDownSkip:
+    """Tests that the watchdog skips SSH calls to downed hosts and re-probes periodically."""
+
+    def _setup(self, monkeypatch, tmp_path):
+        from unittest.mock import MagicMock
+        node_dir = tmp_path / "node"
+        node_dir.mkdir()
+        reg = {"workers": {
+            "rem": {"host": "mac-test", "home_host": "localhost", "home_cwd": "/tmp"},
+        }}
+        (node_dir / "workers.json").write_text(__import__("json").dumps(reg))
+        monkeypatch.setattr(bridge, "NODE_DIR", node_dir)
+        monkeypatch.setattr(bridge, "WORKER_REGISTRY_FILE", node_dir / "workers.json")
+        bridge._host_last_reprobe.clear()
+
+    def test_downed_host_skipped_no_ssh(self, monkeypatch, tmp_path):
+        """When a host is marked DOWN, _watchdog_probe_remote_hosts skips SSH."""
+        from unittest.mock import patch, MagicMock
+        self._setup(monkeypatch, tmp_path)
+
+        bridge.host_health.down["mac-test"] = True
+        bridge.host_health.down_since["mac-test"] = 100.0
+        monkeypatch.setattr(bridge._clock, "time", lambda: 105.0)
+
+        ssh_calls = []
+        orig_remote_run = bridge._remote_run
+        def mock_remote_run(*args, **kwargs):
+            ssh_calls.append(args)
+            return MagicMock(returncode=0, stdout="")
+        monkeypatch.setattr(bridge, "_remote_run", mock_remote_run)
+
+        registered = {"rem": {"tmux": "claude-test-rem", "backend": "claude", "host": "mac-test"}}
+        _rw, _rpids, failed = bridge._watchdog_probe_remote_hosts(registered)
+
+        assert "mac-test" in failed
+        assert len(ssh_calls) == 0, f"SSH should not be called for downed host, got {len(ssh_calls)} calls"
+
+        bridge.host_health.down.pop("mac-test", None)
+        bridge.host_health.down_since.pop("mac-test", None)
+
+    def test_reprobe_after_interval(self, monkeypatch, tmp_path):
+        """After HOST_REPROBE_INTERVAL, a downed host is re-probed."""
+        from unittest.mock import MagicMock, patch
+        self._setup(monkeypatch, tmp_path)
+
+        bridge.host_health.down["mac-test"] = True
+        bridge.host_health.down_since["mac-test"] = 100.0
+        bridge._host_last_reprobe["mac-test"] = 100.0
+        monkeypatch.setattr(bridge._clock, "time", lambda: 100.0 + bridge.HOST_REPROBE_INTERVAL + 1)
+
+        ssh_calls = []
+        def mock_remote_run(*args, **kwargs):
+            ssh_calls.append(args)
+            return MagicMock(returncode=0, stdout="claude-test-rem 12345")
+        monkeypatch.setattr(bridge, "_remote_run", mock_remote_run)
+
+        registered = {"rem": {"tmux": "claude-test-rem", "backend": "claude", "host": "mac-test"}}
+        with patch("bridge._record_host_probe") as mock_record:
+            _rw, rpids, failed = bridge._watchdog_probe_remote_hosts(registered)
+
+        assert len(ssh_calls) == 1, "Should re-probe after interval"
+        mock_record.assert_called_once_with("mac-test", ok=True)
+        assert "mac-test" not in failed
+
+        bridge.host_health.down.pop("mac-test", None)
+        bridge.host_health.down_since.pop("mac-test", None)
+
+    def test_reprobe_failure_keeps_host_down(self, monkeypatch, tmp_path):
+        """When re-probe fails, host stays in failed_hosts."""
+        from unittest.mock import MagicMock, patch
+        import subprocess
+        self._setup(monkeypatch, tmp_path)
+
+        bridge.host_health.down["mac-test"] = True
+        bridge.host_health.down_since["mac-test"] = 100.0
+        bridge._host_last_reprobe["mac-test"] = 100.0
+        monkeypatch.setattr(bridge._clock, "time", lambda: 100.0 + bridge.HOST_REPROBE_INTERVAL + 1)
+
+        def mock_remote_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="ssh", timeout=5)
+        monkeypatch.setattr(bridge, "_remote_run", mock_remote_run)
+
+        registered = {"rem": {"tmux": "claude-test-rem", "backend": "claude", "host": "mac-test"}}
+        with patch("bridge._record_host_probe") as mock_record:
+            _rw, _rpids, failed = bridge._watchdog_probe_remote_hosts(registered)
+
+        assert "mac-test" in failed
+        mock_record.assert_called_once()
+        assert mock_record.call_args[1]["ok"] is False
+
+        bridge.host_health.down.pop("mac-test", None)
+        bridge.host_health.down_since.pop("mac-test", None)
+
+    def test_collect_worker_pids_skips_downed_host(self, monkeypatch, tmp_path):
+        """_watchdog_collect_worker_pids doesn't call _get_claude_pid for workers on downed hosts."""
+        from unittest.mock import patch
+        self._setup(monkeypatch, tmp_path)
+
+        registered = {"rem": {"tmux": "claude-test-rem", "backend": "claude", "host": "mac-test"}}
+        pane_pids = {}
+        remote_pane_pids = {}  # No pids because host was skipped
+        now = 200.0
+
+        pid_calls = []
+        def mock_get_claude_pid(pane_pid, host=None):
+            pid_calls.append(host)
+            return "999"
+        monkeypatch.setattr(bridge, "_get_claude_pid", mock_get_claude_pid)
+
+        cpids, tmux_present, _bi = bridge._watchdog_collect_worker_pids(
+            registered, pane_pids, remote_pane_pids, now
+        )
+
+        assert not tmux_present.get("rem", False), "Worker on downed host should have no tmux"
+        assert len(pid_calls) == 0, "Should not call _get_claude_pid for downed host worker"
+
+    def test_gather_cpu_stats_skips_downed_host(self, monkeypatch, tmp_path):
+        """_watchdog_gather_cpu_stats doesn't call _ps_stats for hosts with no claude_pids."""
+        from unittest.mock import patch
+        self._setup(monkeypatch, tmp_path)
+
+        stats_calls = []
+        def mock_ps_stats(pids, host=None):
+            stats_calls.append(host)
+            return {}
+        monkeypatch.setattr(bridge, "_ps_stats", mock_ps_stats)
+
+        # Empty claude_pids = no workers on downed host have pids
+        stats = bridge._watchdog_gather_cpu_stats({})
+        assert len(stats_calls) == 0, "Should not call _ps_stats when no pids"
+
+
+class TestWatchdogHealthSignalTiming:
+    """Verify watchdog health signal fires before remote SSH probes."""
+
+    def test_health_ok_fires_before_remote_probes(self, monkeypatch, tmp_path):
+        """health.ok('watchdog') must fire before _watchdog_probe_remote_hosts
+        so SSH timeouts don't stall the health signal."""
+        import threading
+        from unittest.mock import patch, MagicMock
+
+        # Setup minimal watchdog state
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(exist_ok=True)
+        monkeypatch.setattr(bridge, "SESSIONS_DIR", str(sessions_dir))
+        node_dir = tmp_path / "node"
+        node_dir.mkdir(exist_ok=True)
+        monkeypatch.setattr(bridge, "NODE_DIR", str(node_dir))
+        reg_file = node_dir / "workers.json"
+        reg_file.write_text("{}")
+        monkeypatch.setattr(bridge, "WORKER_REGISTRY_FILE", str(reg_file))
+        bridge.worker_manager.invalidate_sessions_cache()
+
+        # Track call ordering: health.ok vs remote probe
+        call_order = []
+
+        orig_health_ok = bridge.health.ok
+
+        def tracking_health_ok(signal):
+            if signal == "watchdog":
+                call_order.append("health.ok")
+            orig_health_ok(signal)
+
+        # Remote worker on a fake host
+        registered = {"remw": {"tmux": "claude-test-remw"}}
+        monkeypatch.setattr(bridge, "get_registered_sessions", lambda: registered)
+        monkeypatch.setattr(bridge.worker_manager, "get_registered_sessions", lambda: registered)
+        monkeypatch.setattr(bridge, "get_worker_host", lambda name: "fake-host" if name == "remw" else None)
+        monkeypatch.setattr(bridge, "_is_host_down", lambda host: False)
+
+        stop_event = threading.Event()
+
+        def slow_remote_probe(reg):
+            call_order.append("remote_probe")
+            return {}, {}, set()
+
+        monkeypatch.setattr(bridge, "_watchdog_probe_remote_hosts", slow_remote_probe)
+        monkeypatch.setattr(bridge, "_tmux_pane_pids", lambda: {})
+        monkeypatch.setattr(bridge, "_watchdog_update_probe_failures", lambda rn, pf: None)
+        monkeypatch.setattr(bridge, "_watchdog_collect_worker_pids", lambda r, pp, rpp, n: ({}, {}, {}))
+        monkeypatch.setattr(bridge, "_watchdog_gather_cpu_stats", lambda cp, **kw: {})
+        monkeypatch.setattr(bridge, "_watchdog_evaluate_workers", lambda *a, **kw: None)
+
+        def cleanup_and_stop(rn):
+            stop_event.set()
+
+        monkeypatch.setattr(bridge, "_watchdog_cleanup_stale", cleanup_and_stop)
+        monkeypatch.setattr(bridge, "_health_alert_check", lambda: None)
+        monkeypatch.setattr(bridge.health, "ok", tracking_health_ok)
+
+        # Run one watchdog cycle
+        monkeypatch.setattr(bridge._clock, "time", lambda: 1000000.0)
+        bridge.watchdog.stop_event = stop_event
+        bridge.watchdog_loop()
+
+        # health.ok("watchdog") must appear BEFORE remote_probe
+        assert "health.ok" in call_order, "health.ok('watchdog') never fired"
+        assert "remote_probe" in call_order, "remote probe never fired"
+        health_idx = call_order.index("health.ok")
+        probe_idx = call_order.index("remote_probe")
+        assert health_idx < probe_idx, (
+            f"health.ok fired at index {health_idx}, remote_probe at {probe_idx} — "
+            f"health signal must fire BEFORE remote SSH probes"
+        )
+
+    def test_failed_host_skipped_in_cpu_stats(self, monkeypatch, tmp_path):
+        """_watchdog_gather_cpu_stats should skip hosts in failed_hosts set."""
+        from unittest.mock import patch
+
+        ps_stats_calls = []
+        orig_ps_stats = bridge._ps_stats
+
+        def tracking_ps_stats(pids, host=None):
+            ps_stats_calls.append(host)
+            return {}
+
+        monkeypatch.setattr(bridge, "_ps_stats", tracking_ps_stats)
+        monkeypatch.setattr(bridge, "get_worker_host", lambda name: "dead-host" if name == "remw" else None)
+
+        # Worker with a claude_pid on the failed host
+        claude_pids = {"remw": "12345", "localw": "67890"}
+        stats = bridge._watchdog_gather_cpu_stats(claude_pids, failed_hosts={"dead-host"})
+
+        # Should only call _ps_stats for local host (None), not dead-host
+        assert None in ps_stats_calls, "local _ps_stats not called"
+        assert "dead-host" not in ps_stats_calls, "_ps_stats called for dead-host — should be skipped"

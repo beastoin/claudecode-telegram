@@ -28,6 +28,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import traceback
 import types
 import urllib.error
 import urllib.request
@@ -3149,6 +3150,7 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
             if was_down:
                 host_health.down[host] = False
                 down_since = host_health.down_since.pop(host, now)
+                _host_last_reprobe.pop(host, None)
                 duration = int(now - down_since)
                 workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
                 _do_send = True
@@ -3356,11 +3358,12 @@ def watchdog_loop() -> None:
             registered_names = set(registered.keys())
             probe_failed = bool(registered_names) and not pane_pids
             _watchdog_update_probe_failures(registered_names, probe_failed)
+            health.ok("watchdog")
             remote_workers, remote_pane_pids, failed_hosts = _watchdog_probe_remote_hosts(registered)
             claude_pids, tmux_present, backend_info = _watchdog_collect_worker_pids(
                 registered, pane_pids, remote_pane_pids, now
             )
-            stats = _watchdog_gather_cpu_stats(claude_pids)
+            stats = _watchdog_gather_cpu_stats(claude_pids, failed_hosts=failed_hosts)
             _watchdog_evaluate_workers(
                 registered, tmux_present, claude_pids, backend_info, stats, probe_failed, failed_hosts, now
             )
@@ -3387,6 +3390,9 @@ def _watchdog_update_probe_failures(registered_names: set[str], probe_failed: bo
             watchdog.consecutive_probe_failures[name] = 0
 
 
+_host_last_reprobe: dict[str, float] = {}
+
+
 def _watchdog_probe_remote_hosts(
     registered: dict[str, TmuxSessionDict]
 ) -> tuple[dict[str, list[tuple[str, str]]], dict[str, str], set[str]]:
@@ -3398,7 +3404,18 @@ def _watchdog_probe_remote_hosts(
             remote_workers.setdefault(host, []).append((name, tmux_name))
     remote_pane_pids: dict[str, str] = {}
     failed_hosts: set[str] = set()
+    now = _clock.time()
     for host, _workers in remote_workers.items():
+        if _is_host_down(host):
+            last = _host_last_reprobe.get(host)
+            if last is None:
+                _host_last_reprobe[host] = now
+                failed_hosts.add(host)
+                continue
+            if now - last < HOST_REPROBE_INTERVAL:
+                failed_hosts.add(host)
+                continue
+            _host_last_reprobe[host] = now
         try:
             r = _remote_run(
                 ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
@@ -3451,10 +3468,14 @@ def _watchdog_collect_worker_pids(
     return claude_pids, tmux_present, backend_info
 
 
-def _watchdog_gather_cpu_stats(claude_pids: dict[str, str]) -> dict[str, ProcStatsEntry]:
+def _watchdog_gather_cpu_stats(
+    claude_pids: dict[str, str], *, failed_hosts: set[str] | None = None
+) -> dict[str, ProcStatsEntry]:
     pids_by_host: dict[str | None, list[str]] = {}
     for name, pid in claude_pids.items():
         host = get_worker_host(name)
+        if host and failed_hosts and host in failed_hosts:
+            continue
         pids_by_host.setdefault(host, []).append(pid)
     stats: dict[str, ProcStatsEntry] = {}
     for host, pids in pids_by_host.items():
@@ -10890,6 +10911,21 @@ def main() -> None:
         return
     signal.signal(signal.SIGTERM, graceful_shutdown)
     signal.signal(signal.SIGINT, graceful_shutdown)
+
+    def _dump_threads(signum: int, frame: types.FrameType | None) -> None:
+        lines = [f"=== Thread dump (SIGUSR1) at {datetime.now().isoformat()} ==="]
+        for tid, tframe in sys._current_frames().items():
+            tname = "unknown"
+            for t in threading.enumerate():
+                if t.ident == tid:
+                    tname = t.name
+                    break
+            lines.append(f"\n--- Thread {tname} (id={tid}) ---")
+            lines.extend(traceback.format_stack(tframe))
+        dump = "\n".join(lines)
+        _log(_LOG_WARN, "bridge", dump)
+
+    signal.signal(signal.SIGUSR1, _dump_threads)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     SESSIONS_DIR.chmod(0o700)
     try:
