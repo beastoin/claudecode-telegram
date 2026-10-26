@@ -186,7 +186,7 @@ class WorkerWatchdogState:
         self.last_seen_claude: dict[str, float] = {}
         self.last_hook_ts: dict[str, float] = {}
         self.last_alert_ts: dict[str, float] = {}
-        self.alert_msg_ids: dict[str, tuple[int, str]] = {}
+        self.alert_msg_ids: dict[str, tuple[int, str, str]] = {}
         self.idle_streak: dict[str, int] = {}
         self.prev_worker_states: dict[str, str] = {}
         self.consecutive_probe_failures: dict[str, int] = {}
@@ -266,6 +266,7 @@ class HostHealthState:
         self.io_alert: dict[str, ResourceAlertState] = {}
         self.tailscale_down: bool = False
         self.tailscale_alert_ts: float = 0.0
+        self.alert_refs: dict[str, str] = {}  # host -> 6-char ref ID
 
     def reset(self) -> None:
         self.__init__()  # type: ignore[misc]

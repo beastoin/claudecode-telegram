@@ -1,5 +1,19 @@
 ## Changelog
 
+### v0.52.10 - Alert reference IDs for incident tracking
+
+Every alert now carries a `ref:<hex>` tag — a 6-character ID that links the firing alert to its resolution. The same ref appears on both fire and resolve messages so incidents are traceable end-to-end.
+
+**Covered alert paths:**
+- Worker state alerts (EXITED, DEAD, STUCK, POISONED, WAITING_INPUT) — fire + resolution edit
+- Connector alerts (Gmail, GitHub polling failures) — fire + recovery
+- Health signal alerts (thread dead, pool saturation) — fire + resolve
+- Host alerts (SSH DOWN/UP) — fire + recovery
+- JSONL staleness alerts — fire
+- Health endpoint (`/alerts`) — fire
+
+The ref IDs are derived from the existing `_log_event()` event IDs already written to bridge.log JSONL, so the short ref maps to the full structured log entry for deeper tracing.
+
 ### v0.52.9 - Prevent startup crash on SSH timeout to remote hosts
 
 `_discover_and_configure_sessions()` called `tmux_exists()` per remote worker without a try/except. When Mac Mini SSH timed out, the unhandled `TimeoutExpired` exception crashed the entire bridge startup — same pattern as the watchdog bug fixed in v0.52.8 but in the startup path.

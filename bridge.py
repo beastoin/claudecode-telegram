@@ -715,6 +715,7 @@ class BaseConnector[M](abc.ABC):
         self._handler_errors: int = 0  # messages that arrived but failed to deliver
         self._handler_error_alerted: bool = False
         self._alert_sent: bool = False
+        self._alert_ref: str = ""
         self._lock: threading.RLock = threading.RLock()
 
     @abc.abstractmethod
@@ -808,7 +809,8 @@ class BaseConnector[M](abc.ABC):
     def _send_alert(self, text: str) -> None:
         tag = f"[{self.connector_name}]"
         _log(_LOG_WARN, self.connector_name, f"ALERT: {text}")
-        _alert_log_append("fire", f"connector:{self.connector_name}", desc=text[:200])
+        eid = _alert_log_append("fire", f"connector:{self.connector_name}", desc=text[:200])
+        ref = eid[:6]
         alert_fn = self.on_alert
         if alert_fn is None:
             return
@@ -816,8 +818,9 @@ class BaseConnector[M](abc.ABC):
             if self._alert_sent:
                 return
             self._alert_sent = True
+            self._alert_ref = ref
         try:
-            alert_fn(f"{tag} {text}")
+            alert_fn(f"{tag} {text}\nref:{ref}")
         except Exception as e:
             _log(_LOG_WARN, self.connector_name, f"Failed to send alert: {e}")
             with self._lock:
@@ -826,12 +829,15 @@ class BaseConnector[M](abc.ABC):
     def _clear_alert(self) -> None:
         with self._lock:
             was_alerted = self._alert_sent
+            ref = getattr(self, "_alert_ref", "")
             self._alert_sent = False
+            self._alert_ref = ""
         if was_alerted:
             tag = f"[{self.connector_name}]"
+            ref_tag = f" ref:{ref}" if ref else ""
             if self.on_alert:
                 try:
-                    self.on_alert(f"{tag} Recovered — polling resumed")
+                    self.on_alert(f"{tag} Recovered — polling resumed{ref_tag}")
                 except Exception as e:
                     _log(_LOG_WARN, self.connector_name, f"Failed to send recovery alert: {e}")
 
@@ -3126,7 +3132,9 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         text = f"{icon} {name} {msg}.\n{cmd} {name}"
     else:
         text = f"{name}: {state} ({reason}). Check /team"
-    _alert_log_append("fire", f"worker:{name}", state=state, reason=reason[:200], desc=text.splitlines()[0])
+    eid = _alert_log_append("fire", f"worker:{name}", state=state, reason=reason[:200], desc=text.splitlines()[0])
+    ref = eid[:6]
+    text += f"\nref:{ref}"
     result = _emit_alert(text, tag="watchdog")
     if result and result.get("ok"):
         _log(_LOG_WARN, "watchdog", f"Alert sent for {name} ({state}): {text[:80]}")
@@ -3135,7 +3143,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
         with watchdog.lock:
             watchdog.last_alert_ts[name] = now
             if msg_id:
-                watchdog.alert_msg_ids[name] = (msg_id, text)
+                watchdog.alert_msg_ids[name] = (msg_id, text, ref)
     else:
         _log(_LOG_WARN, "watchdog", f"Alert FAILED for {name} ({state}): {result}")
 
@@ -3151,10 +3159,12 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
                 host_health.down[host] = False
                 down_since = host_health.down_since.pop(host, now)
                 _host_last_reprobe.pop(host, None)
+                orig_ref = host_health.alert_refs.pop(host, "")
                 duration = int(now - down_since)
                 workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
                 _do_send = True
-                alert_text = f"✅ Host BACK UP: {host}\nWas down for {duration // 60}m {duration % 60}s\nWorkers affected: {', '.join(workers_on_host) or 'none'}"
+                ref_tag = f"\nref:{orig_ref}" if orig_ref else ""
+                alert_text = f"✅ Host BACK UP: {host}\nWas down for {duration // 60}m {duration % 60}s\nWorkers affected: {', '.join(workers_on_host) or 'none'}{ref_tag}"
                 _alert_log_append("resolve", f"host:{host}", duration_s=duration)
             else:
                 _do_send = False
@@ -3168,8 +3178,10 @@ def _record_host_probe(host: str, ok: bool, error: str | None = None) -> None:
                 host_health.down_since[host] = now
                 workers_on_host = [n for n, s in get_registered_sessions().items() if get_worker_host(n) == host]
                 _do_send = True
-                alert_text = f"🔴 Host DOWN: {host}\nAfter {failures} consecutive SSH failures\nError: {error or 'unknown'}\nWorkers affected: {', '.join(workers_on_host) or 'none'}"
-                _alert_log_append("fire", f"host:{host}", state="DOWN", reason=error or "ssh probe failed")
+                eid = _alert_log_append("fire", f"host:{host}", state="DOWN", reason=error or "ssh probe failed")
+                ref = eid[:6]
+                host_health.alert_refs[host] = ref
+                alert_text = f"🔴 Host DOWN: {host}\nAfter {failures} consecutive SSH failures\nError: {error or 'unknown'}\nWorkers affected: {', '.join(workers_on_host) or 'none'}\nref:{ref}"
             else:
                 _do_send = False
                 alert_text = None
@@ -3203,10 +3215,11 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
     with watchdog.lock:
         alert_info = watchdog.alert_msg_ids.pop(name, None)
     if alert_info:
-        old_msg_id, old_text = alert_info
-        resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]})"
+        old_msg_id, old_text, ref = alert_info
+        ref_tag = f" ref:{ref}" if ref else ""
+        resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]}){ref_tag}"
         _emit_alert(resolved_text, tag="watchdog", edit_msg_id=old_msg_id)
-        _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved")
+        _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved{ref_tag}")
         return
     text = f"✅ {name} is back to normal."
     _emit_alert(text, tag="watchdog")
@@ -3336,7 +3349,10 @@ def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> N
             f"🔶 {name}: transcript not recording ({age_min}m stale, worker busy for {int(busy_duration) // 60}m).\n"
             f"inotify/file watcher may have stopped. `/restart {name}` to fix."
         )
-        _alert_log_append("fire", f"jsonl:{name}", state="STALE", reason=f"age={int(age)}s busy={int(busy_duration)}s")
+        eid = _alert_log_append(
+            "fire", f"jsonl:{name}", state="STALE", reason=f"age={int(age)}s busy={int(busy_duration)}s"
+        )
+        alert_text += f"\nref:{eid[:6]}"
         result = _emit_alert(alert_text, tag="jsonl-stale")
         if result and result.get("ok"):
             _jsonl_stale_last_alert[name] = now
@@ -7506,7 +7522,8 @@ def handle_health_alert(handler: Handler, body: bytes = b"") -> None:
         issue = _str_field(data, "issue", "unknown")
         age = _int_field(data, "transcript_age")
         age_human = f"{age // 3600}h{(age % 3600) // 60}m" if age >= 3600 else f"{age // 60}m"
-        alert_text = f"🔴 {worker}: JSONL transcript stale ({age_human}). Session active but not recording. `/restart {worker}` to fix."
+        eid = _log_event("alert", "fire", key=f"health:{worker}", desc=f"{issue} age={age}s")
+        alert_text = f"🔴 {worker}: JSONL transcript stale ({age_human}). Session active but not recording. `/restart {worker}` to fix.\nref:{eid[:6]}"
         _log(_LOG_WARN, "health", f"Health alert: {worker} — {issue} (age={age}s)")
         _emit_alert(alert_text, tag="health")
         handler._send_json(200, {"ok": True})
@@ -10233,6 +10250,7 @@ _ALERT_SNOOZE = 3600  # 1hr: /alert snooze duration
 _alert_active: dict[str, float] = {}  # signal -> time.time() when first alerted
 _alert_last_sent: dict[str, float] = {}  # signal -> time.time() when last alert sent
 _alert_snoozed: dict[str, float] = {}  # signal -> time.time() when snooze expires
+_alert_refs: dict[str, str] = {}  # signal -> 6-char ref ID from _alert_log_append
 _alert_lock = threading.Lock()
 _health_channel_id: str | None = None  # set during startup
 
@@ -10369,10 +10387,12 @@ def _health_alert_check() -> None:
             fs_resolved = _alert_active.pop(key, None)
             _alert_last_sent.pop(key, None)
             _alert_snoozed.pop(key, None)
+            orig_ref = _alert_refs.pop(key, "")
         duration_s = round(now - fs_resolved, 1) if fs_resolved else 0
         _alert_log_append("resolve", key, duration_s=duration_s)
         _alerts_active_save()
-        _send_health_alert(f"✅ Resolved: {key}")
+        ref_tag = f" ref:{orig_ref}" if orig_ref else ""
+        _send_health_alert(f"✅ Resolved: {key}{ref_tag}")
     # --- Active problems: classify severity, apply cooldown/snooze ---
     if not current_problems:
         return
@@ -10403,11 +10423,20 @@ def _health_alert_check() -> None:
                 continue
             _alert_last_sent[key] = now
         if is_new:
-            _alert_log_append("fire", key, desc=desc)
+            eid = _alert_log_append("fire", key, desc=desc)
+            ref = eid[:6]
+            with _alert_lock:
+                _alert_refs[key] = ref
         elif age >= _ALERT_ESCALATE and age - (now - last_sent if last_sent else age) < _ALERT_ESCALATE:
             _alert_log_append("escalate", key, desc=desc, age_s=round(age, 1))
+            with _alert_lock:
+                ref = _alert_refs.get(key, "")
+        else:
+            with _alert_lock:
+                ref = _alert_refs.get(key, "")
         duration = _fmt_duration(now - first_seen)
-        to_send.append(f"{severity} {desc} ({duration})")
+        ref_tag = f" ref:{ref}" if ref else ""
+        to_send.append(f"{severity} {desc} ({duration}){ref_tag}")
     if active_changed:
         _alerts_active_save()
     if to_send:

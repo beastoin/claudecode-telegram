@@ -857,7 +857,7 @@ All operational messages use `_log(level, component, message)` from `shared.py`:
 ```json
 {
   "ok": true,
-  "version": "0.52.9",
+  "version": "0.52.10",
   "uptime_s": 3600,
   "signals": {"poll": {"ok": true, "last_ok_ago_s": 5.2, "errors": 0}, ...},
   "threads": {"worker-watchdog": true, ...},
