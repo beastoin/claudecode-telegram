@@ -3108,12 +3108,17 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
 
 
 # --- Unified alert delivery ---
-def _emit_alert(text: str, *, tag: str = "alert", edit_msg_id: int | None = None) -> TelegramApiResponseDict | None:
-    """Single delivery sink for all alerts: Telegram admin + relay channel + worker tmux.
+def _emit_alert(
+    text: str, *, tag: str = "alert", edit_msg_id: int | None = None, relay: bool = True
+) -> TelegramApiResponseDict | None:
+    """Single delivery sink for all alerts: Telegram admin + optionally relay channel.
 
     Every alert source (resource probes, worker state, health signals, connectors,
     JSONL hooks) flows through here. Cooldown/escalation stays in the caller —
     this only handles delivery fan-out.
+
+    relay=False skips worker relay — use for worker-lifecycle alerts that only
+    the manager needs (worker state, JSONL staleness).
     """
     result = None
     if admin_chat_id:
@@ -3124,8 +3129,9 @@ def _emit_alert(text: str, *, tag: str = "alert", edit_msg_id: int | None = None
                 transport.edit_message(admin_chat_id, edit_msg_id, text)
             else:
                 result = transport.send_text(admin_chat_id, text)
-    with _log_suppress(Exception, tag=tag, msg=f"{tag} worker relay failed: "):
-        _send_health_alert(text)
+    if relay:
+        with _log_suppress(Exception, tag=tag, msg=f"{tag} worker relay failed: "):
+            _send_health_alert(text)
     return result
 
 
@@ -3185,7 +3191,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     eid = _alert_log_append("fire", f"worker:{name}", state=state, reason=reason[:200], desc=text.splitlines()[0])
     ref = eid[:6]
     text += f"\nref:{ref}"
-    result = _emit_alert(text, tag="watchdog")
+    result = _emit_alert(text, tag="watchdog", relay=False)
     if result and result.get("ok"):
         _log(_LOG_WARN, "watchdog", f"Alert sent for {name} ({state}): {text[:80]}")
         _res = result.get("result", {})
@@ -3268,11 +3274,11 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
         old_msg_id, old_text, ref = alert_info
         ref_tag = f" ref:{ref}" if ref else ""
         resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]}){ref_tag}"
-        _emit_alert(resolved_text, tag="watchdog", edit_msg_id=old_msg_id)
+        _emit_alert(resolved_text, tag="watchdog", edit_msg_id=old_msg_id, relay=False)
         _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved{ref_tag}")
         return
     text = f"✅ {name} is back to normal."
-    _emit_alert(text, tag="watchdog")
+    _emit_alert(text, tag="watchdog", relay=False)
 
 
 def _handle_watchdog_transition(
@@ -3377,7 +3383,9 @@ def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> N
                 _alert_log_append("resolve", f"jsonl:{name}", ref=ref)
                 ref_tag = f"\nref:{ref}" if ref else ""
                 _emit_alert(
-                    f"✅ {name}: transcript recording resumed (worker no longer busy){ref_tag}", tag="jsonl-stale"
+                    f"✅ {name}: transcript recording resumed (worker no longer busy){ref_tag}",
+                    tag="jsonl-stale",
+                    relay=False,
                 )
             continue
         busy_duration = now - entry[2]
@@ -3400,7 +3408,7 @@ def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> N
                 _jsonl_stale_alerted.discard(name)
                 _alert_log_append("resolve", f"jsonl:{name}", ref=ref)
                 ref_tag = f"\nref:{ref}" if ref else ""
-                _emit_alert(f"✅ {name}: transcript recording resumed{ref_tag}", tag="jsonl-stale")
+                _emit_alert(f"✅ {name}: transcript recording resumed{ref_tag}", tag="jsonl-stale", relay=False)
             continue
         last_alert = _jsonl_stale_last_alert.get(name, 0)
         if now - last_alert < _JSONL_STALE_ALERT_COOLDOWN:
@@ -3416,7 +3424,7 @@ def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> N
             "fire", f"jsonl:{name}", state="STALE", reason=f"age={int(age)}s busy={int(busy_duration)}s"
         )
         alert_text += f"\nref:{eid[:6]}"
-        result = _emit_alert(alert_text, tag="jsonl-stale")
+        result = _emit_alert(alert_text, tag="jsonl-stale", relay=False)
         if result and result.get("ok"):
             _jsonl_stale_last_alert[name] = now
             _jsonl_stale_alerted.add(name)

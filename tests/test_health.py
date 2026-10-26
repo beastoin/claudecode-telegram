@@ -1778,6 +1778,116 @@ class TestHealthSignalReachesAdmin:
             bridge._alert_refs.clear()
 
 
+class TestWorkerCycleNoRelay:
+    """Worker-cycle alerts (state changes, JSONL staleness) must NOT relay to workers."""
+
+    def test_watchdog_fire_no_relay(self):
+        """_send_watchdog_alert uses relay=False — no _send_health_alert call."""
+        relay_calls: list[str] = []
+        orig_health_alert = bridge._send_health_alert
+        orig_api = bridge.telegram_api
+        bridge._send_health_alert = lambda text: relay_calls.append(text)
+        bridge.telegram_api = lambda method, data: {"ok": True, "result": {"message_id": 1}}
+        bridge.admin_chat_id = 12345
+        with bridge.watchdog.lock:
+            bridge.watchdog.last_alert_ts.clear()
+            bridge.watchdog.alert_msg_ids.clear()
+        try:
+            bridge._send_watchdog_alert("testworker", "DEAD", "process exited")
+            assert len(relay_calls) == 0, "watchdog fire must not relay to workers"
+        finally:
+            bridge._send_health_alert = orig_health_alert
+            bridge.telegram_api = orig_api
+            bridge.admin_chat_id = None
+            with bridge.watchdog.lock:
+                bridge.watchdog.last_alert_ts.pop("testworker", None)
+                bridge.watchdog.alert_msg_ids.pop("testworker", None)
+
+    def test_watchdog_resolve_no_relay(self):
+        """_send_resolved_alert uses relay=False — no _send_health_alert call."""
+        relay_calls: list[str] = []
+        orig_health_alert = bridge._send_health_alert
+        orig_api = bridge.telegram_api
+        bridge._send_health_alert = lambda text: relay_calls.append(text)
+        bridge.telegram_api = lambda method, data: {"ok": True, "result": {"message_id": 1}}
+        bridge.admin_chat_id = 12345
+        with bridge.watchdog.lock:
+            bridge.watchdog.last_resolved_ts.clear()
+        try:
+            bridge._send_resolved_alert("testworker", "ACTIVE")
+            assert len(relay_calls) == 0, "watchdog resolve must not relay to workers"
+        finally:
+            bridge._send_health_alert = orig_health_alert
+            bridge.telegram_api = orig_api
+            bridge.admin_chat_id = None
+
+    def test_jsonl_stale_fire_no_relay(self):
+        """JSONL staleness fire uses relay=False."""
+        import os, time
+        relay_calls: list[str] = []
+        orig_health_alert = bridge._send_health_alert
+        orig_api = bridge.telegram_api
+        orig_resolve = bridge._resolve_transcript_path
+        orig_get_host = bridge.get_worker_host
+        orig_log_append = bridge._alert_log_append
+        bridge._send_health_alert = lambda text: relay_calls.append(text)
+        bridge.telegram_api = lambda method, data: {"ok": True, "result": {"message_id": 1}}
+        bridge._alert_log_append = lambda *a, **kw: "abc123def456"
+        bridge.admin_chat_id = 12345
+        now = time.time()
+        # Simulate a busy worker with stale JSONL
+        with bridge.watchdog.lock:
+            bridge.watchdog.worker_states["staletest"] = ("BUSY_TOOL", "active", now - 400, "")
+        bridge._jsonl_stale_alerted.discard("staletest")
+        bridge._jsonl_stale_last_alert.pop("staletest", None)
+        bridge._jsonl_stale_refs.pop("staletest", None)
+        # Create a stale JSONL file
+        import tempfile
+        tmpdir = tempfile.mkdtemp()
+        fake_jsonl = os.path.join(tmpdir, "fake.jsonl")
+        with open(fake_jsonl, "w") as f:
+            f.write("{}\n")
+        os.utime(fake_jsonl, (now - 400, now - 400))
+        bridge._resolve_transcript_path = lambda name: (fake_jsonl, "sid", "/tmp")
+        bridge.get_worker_host = lambda name: None
+        reg = bridge.worker_manager.get_registered_sessions
+        bridge.worker_manager.get_registered_sessions = lambda: {"staletest": {"name": "staletest"}}
+        try:
+            bridge._watchdog_jsonl_staleness_check({"staletest": {"name": "staletest"}})
+            assert len(relay_calls) == 0, "JSONL stale fire must not relay to workers"
+        finally:
+            bridge._send_health_alert = orig_health_alert
+            bridge.telegram_api = orig_api
+            bridge._resolve_transcript_path = orig_resolve
+            bridge.get_worker_host = orig_get_host
+            bridge._alert_log_append = orig_log_append
+            bridge.worker_manager.get_registered_sessions = reg
+            bridge.admin_chat_id = None
+            with bridge.watchdog.lock:
+                bridge.watchdog.worker_states.pop("staletest", None)
+            bridge._jsonl_stale_alerted.discard("staletest")
+            bridge._jsonl_stale_last_alert.pop("staletest", None)
+            bridge._jsonl_stale_refs.pop("staletest", None)
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_resource_alert_still_relays(self):
+        """Resource alerts (non-worker-cycle) still relay to workers."""
+        relay_calls: list[str] = []
+        orig_health_alert = bridge._send_health_alert
+        orig_api = bridge.telegram_api
+        bridge._send_health_alert = lambda text: relay_calls.append(text)
+        bridge.telegram_api = lambda method, data: {"ok": True, "result": {"message_id": 1}}
+        bridge.admin_chat_id = 12345
+        try:
+            bridge._emit_alert("test resource alert", tag="watchdog")
+            assert len(relay_calls) == 1, "resource alerts must still relay to workers"
+        finally:
+            bridge._send_health_alert = orig_health_alert
+            bridge.telegram_api = orig_api
+            bridge.admin_chat_id = None
+
+
 class TestCpuHogRefId:
     """GAP-1 (CPU hogs): CPU hog alerts get ref IDs via _watchdog_alert key param."""
 

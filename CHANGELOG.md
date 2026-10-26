@@ -1,5 +1,17 @@
 ## Changelog
 
+### v0.52.12 - Worker-cycle alerts skip worker relay
+
+Worker lifecycle alerts (state changes, JSONL staleness) now go to Telegram admin ONLY — they no longer relay to worker sessions via `_send_health_alert`. Manager directive: worker-cycle alerts are operational noise for workers.
+
+**Changes:**
+- `_emit_alert` gained `relay: bool = True` parameter — `relay=False` skips `_send_health_alert`
+- `_send_watchdog_alert` (worker state fire): `relay=False`
+- `_send_resolved_alert` (worker state resolve): `relay=False` on both edit and fallback paths
+- JSONL staleness fire + both resolve paths: `relay=False`
+- Infrastructure alerts (resource probes, CPU hog, tailscale, host probes, connectors) unchanged — still relay to workers
+- 4 new tests verifying relay behavior, 364 FAST total, 0 failures
+
 ### v0.52.11 - Close 6 alert system gaps from full audit
 
 Full audit of 9 alert paths against 7 quality criteria. Fixed all identified gaps:
