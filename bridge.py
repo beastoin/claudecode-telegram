@@ -3285,9 +3285,67 @@ def _record_worker_state(name: str, state: str, reason: str, now: float) -> floa
     return since
 
 
+# --- JSONL staleness detection ---
+_JSONL_STALE_THRESHOLD = 300  # 5 minutes — BUSY worker JSONL should update more often
+_JSONL_STALE_ALERT_COOLDOWN = 600  # 10 minutes between re-alerts per worker
+_jsonl_stale_last_alert: dict[str, float] = {}
+_jsonl_stale_alerted: set[str] = set()
+
+
+def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> None:
+    """Check JSONL transcript freshness for busy workers.
+
+    When Claude Code is mid-turn (BUSY), it writes to the JSONL transcript via
+    inotify/kqueue file watchers. If the JSONL stops updating while the worker
+    is busy, the file watcher likely died — alert the manager.
+    """
+    now = _clock.time()
+    busy_states = {"BUSY_TOOL", "BUSY_THINKING"}
+    for name in registered:
+        with watchdog.lock:
+            entry = watchdog.worker_states.get(name)
+        if not entry or entry[0] not in busy_states:
+            _jsonl_stale_alerted.discard(name)
+            continue
+        busy_duration = now - entry[2]
+        if busy_duration < _JSONL_STALE_THRESHOLD:
+            continue
+        host = get_worker_host(name)
+        if host:
+            continue  # skip remote workers — can't stat their JSONL locally
+        try:
+            transcript_path, _sid, _cwd = _resolve_transcript_path(name)
+            if not transcript_path or not os.path.exists(str(transcript_path)):
+                continue
+            mtime = os.path.getmtime(str(transcript_path))
+            age = now - mtime
+        except (OSError, ValueError):
+            continue
+        if age < _JSONL_STALE_THRESHOLD:
+            _jsonl_stale_alerted.discard(name)
+            continue
+        last_alert = _jsonl_stale_last_alert.get(name, 0)
+        if now - last_alert < _JSONL_STALE_ALERT_COOLDOWN:
+            continue
+        if name in _jsonl_stale_alerted:
+            continue
+        age_min = int(age) // 60
+        alert_text = (
+            f"🔶 {name}: transcript not recording ({age_min}m stale, worker busy for {int(busy_duration) // 60}m).\n"
+            f"inotify/file watcher may have stopped. `/restart {name}` to fix."
+        )
+        _alert_log_append("fire", f"jsonl:{name}", state="STALE", reason=f"age={int(age)}s busy={int(busy_duration)}s")
+        result = _emit_alert(alert_text, tag="jsonl-stale")
+        if result and result.get("ok"):
+            _jsonl_stale_last_alert[name] = now
+            _jsonl_stale_alerted.add(name)
+            _log(_LOG_WARN, "watchdog", f"JSONL stale alert for {name}: age={int(age)}s, busy={int(busy_duration)}s")
+
+
 # --- Watchdog loop and helpers ---
 def watchdog_loop() -> None:
     _disk_check_counter = 0
+    _jsonl_check_counter = 0
     while not watchdog.stop_event.is_set():
         with _log_suppress(
             subprocess.SubprocessError, ValueError, KeyError, level=_LOG_ERROR, tag="watchdog", msg="Watchdog error: "
@@ -3311,6 +3369,10 @@ def watchdog_loop() -> None:
             if _disk_check_counter >= 20:
                 _disk_check_counter = 0
                 _watchdog_resource_checks(set(remote_workers.keys()))
+            _jsonl_check_counter += 1
+            if _jsonl_check_counter >= 20:
+                _jsonl_check_counter = 0
+                _watchdog_jsonl_staleness_check(registered)
             health.ok("watchdog")
             _health_alert_check()
         watchdog.stop_event.wait(WATCHDOG_INTERVAL)

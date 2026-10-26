@@ -1253,3 +1253,143 @@ class TestEmitAlert:
         with patch.object(bridge, "_emit_alert") as mock_emit:
             handler("GitHub poll failed")
         mock_emit.assert_called_once_with("GitHub poll failed", tag="github")
+
+
+# --- JSONL staleness detection tests ---
+
+class TestJsonlStalenessCheck:
+
+    def _setup_busy_worker(self, name, busy_since, monkeypatch):
+        """Set up a worker that appears BUSY in watchdog state."""
+        import threading
+        if not hasattr(bridge, 'watchdog') or not hasattr(bridge.watchdog, 'lock'):
+            bridge.watchdog = threading.current_thread()
+            bridge.watchdog.lock = threading.Lock()
+            bridge.watchdog.worker_states = {}
+        with bridge.watchdog.lock:
+            bridge.watchdog.worker_states[name] = ("BUSY_TOOL", "running tool", busy_since)
+
+    def _cleanup_jsonl_state(self):
+        bridge._jsonl_stale_last_alert.clear()
+        bridge._jsonl_stale_alerted.clear()
+
+    def test_jsonl_stale_alert_fires_for_busy_worker(self, monkeypatch, tmp_path):
+        """Alert fires when BUSY worker's JSONL hasn't updated in >5 minutes."""
+        from unittest.mock import patch, MagicMock
+        self._cleanup_jsonl_state()
+        now = 1000000.0
+        busy_since = now - 400  # busy for 400s
+        self._setup_busy_worker("testw", busy_since, monkeypatch)
+        monkeypatch.setattr(bridge, "get_worker_host", lambda name: None)
+        jsonl_file = tmp_path / "transcript.jsonl"
+        jsonl_file.write_text("{}")
+        import os
+        os.utime(str(jsonl_file), (now - 600, now - 600))  # 10 min old
+        monkeypatch.setattr(bridge, "_resolve_transcript_path", lambda name: (str(jsonl_file), "sid1", "/tmp"))
+        monkeypatch.setattr(bridge._clock, "time", lambda: now)
+        with patch.object(bridge, "_emit_alert", return_value={"ok": True}) as mock_emit, \
+             patch.object(bridge, "_alert_log_append"):
+            bridge._watchdog_jsonl_staleness_check({"testw": {}})
+        assert mock_emit.called
+        alert_text = mock_emit.call_args[0][0]
+        assert "testw" in alert_text
+        assert "transcript not recording" in alert_text
+        assert "inotify" in alert_text
+        self._cleanup_jsonl_state()
+
+    def test_jsonl_stale_skips_ready_worker(self, monkeypatch, tmp_path):
+        """No alert for READY (non-busy) workers even if JSONL is old."""
+        from unittest.mock import patch
+        self._cleanup_jsonl_state()
+        import threading
+        if not hasattr(bridge, 'watchdog') or not hasattr(bridge.watchdog, 'lock'):
+            bridge.watchdog = threading.current_thread()
+            bridge.watchdog.lock = threading.Lock()
+            bridge.watchdog.worker_states = {}
+        with bridge.watchdog.lock:
+            bridge.watchdog.worker_states["readyw"] = ("READY", "idle", 0.0)
+        monkeypatch.setattr(bridge._clock, "time", lambda: 1000000.0)
+        with patch.object(bridge, "_emit_alert") as mock_emit:
+            bridge._watchdog_jsonl_staleness_check({"readyw": {}})
+        mock_emit.assert_not_called()
+        self._cleanup_jsonl_state()
+
+    def test_jsonl_stale_skips_remote_worker(self, monkeypatch, tmp_path):
+        """Remote workers are skipped (can't stat their JSONL locally)."""
+        from unittest.mock import patch
+        self._cleanup_jsonl_state()
+        now = 1000000.0
+        self._setup_busy_worker("remotew", now - 400, monkeypatch)
+        monkeypatch.setattr(bridge, "get_worker_host", lambda name: "macmini")
+        monkeypatch.setattr(bridge._clock, "time", lambda: now)
+        with patch.object(bridge, "_emit_alert") as mock_emit:
+            bridge._watchdog_jsonl_staleness_check({"remotew": {}})
+        mock_emit.assert_not_called()
+        self._cleanup_jsonl_state()
+
+    def test_jsonl_stale_no_alert_when_fresh(self, monkeypatch, tmp_path):
+        """No alert when JSONL was recently updated (even if worker is busy)."""
+        from unittest.mock import patch
+        self._cleanup_jsonl_state()
+        now = 1000000.0
+        self._setup_busy_worker("freshw", now - 400, monkeypatch)
+        monkeypatch.setattr(bridge, "get_worker_host", lambda name: None)
+        jsonl_file = tmp_path / "transcript.jsonl"
+        jsonl_file.write_text("{}")
+        import os
+        os.utime(str(jsonl_file), (now - 30, now - 30))  # 30s old — fresh
+        monkeypatch.setattr(bridge, "_resolve_transcript_path", lambda name: (str(jsonl_file), "sid1", "/tmp"))
+        monkeypatch.setattr(bridge._clock, "time", lambda: now)
+        with patch.object(bridge, "_emit_alert") as mock_emit:
+            bridge._watchdog_jsonl_staleness_check({"freshw": {}})
+        mock_emit.assert_not_called()
+        self._cleanup_jsonl_state()
+
+    def test_jsonl_stale_cooldown_prevents_spam(self, monkeypatch, tmp_path):
+        """Second alert within cooldown window is suppressed."""
+        from unittest.mock import patch
+        self._cleanup_jsonl_state()
+        now = 1000000.0
+        self._setup_busy_worker("spamw", now - 400, monkeypatch)
+        monkeypatch.setattr(bridge, "get_worker_host", lambda name: None)
+        jsonl_file = tmp_path / "transcript.jsonl"
+        jsonl_file.write_text("{}")
+        import os
+        os.utime(str(jsonl_file), (now - 600, now - 600))
+        monkeypatch.setattr(bridge, "_resolve_transcript_path", lambda name: (str(jsonl_file), "sid1", "/tmp"))
+        monkeypatch.setattr(bridge._clock, "time", lambda: now)
+        # First alert fires
+        with patch.object(bridge, "_emit_alert", return_value={"ok": True}) as mock_emit, \
+             patch.object(bridge, "_alert_log_append"):
+            bridge._watchdog_jsonl_staleness_check({"spamw": {}})
+        assert mock_emit.called
+        # Second call — should be suppressed (in _jsonl_stale_alerted set)
+        with patch.object(bridge, "_emit_alert") as mock_emit2:
+            bridge._watchdog_jsonl_staleness_check({"spamw": {}})
+        mock_emit2.assert_not_called()
+        self._cleanup_jsonl_state()
+
+    def test_jsonl_stale_clears_on_fresh_update(self, monkeypatch, tmp_path):
+        """Alert state clears when JSONL becomes fresh again."""
+        from unittest.mock import patch
+        self._cleanup_jsonl_state()
+        now = 1000000.0
+        self._setup_busy_worker("clearw", now - 400, monkeypatch)
+        monkeypatch.setattr(bridge, "get_worker_host", lambda name: None)
+        jsonl_file = tmp_path / "transcript.jsonl"
+        jsonl_file.write_text("{}")
+        import os
+        os.utime(str(jsonl_file), (now - 600, now - 600))
+        monkeypatch.setattr(bridge, "_resolve_transcript_path", lambda name: (str(jsonl_file), "sid1", "/tmp"))
+        monkeypatch.setattr(bridge._clock, "time", lambda: now)
+        # Fire initial alert
+        with patch.object(bridge, "_emit_alert", return_value={"ok": True}), \
+             patch.object(bridge, "_alert_log_append"):
+            bridge._watchdog_jsonl_staleness_check({"clearw": {}})
+        assert "clearw" in bridge._jsonl_stale_alerted
+        # Now JSONL becomes fresh
+        os.utime(str(jsonl_file), (now - 10, now - 10))
+        with patch.object(bridge, "_emit_alert") as mock_emit:
+            bridge._watchdog_jsonl_staleness_check({"clearw": {}})
+        assert "clearw" not in bridge._jsonl_stale_alerted
+        self._cleanup_jsonl_state()

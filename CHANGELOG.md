@@ -1,5 +1,18 @@
 ## Changelog
 
+### v0.52.6 - Bridge-side JSONL staleness detection
+
+**Feature:** Proactive transcript health monitoring. The bridge watchdog now checks JSONL transcript freshness for all BUSY workers every ~80 seconds (20 watchdog cycles). If a worker has been busy for >5 minutes and its JSONL transcript file hasn't been updated, the manager gets an alert — the inotify/kqueue file watcher likely died.
+
+**Background:** Claude Code writes transcript events to a JSONL file via OS-level file watchers (inotify on Linux, kqueue/fsevents on macOS). When these watchers die silently, the transcript stops recording but the worker appears healthy. Previously, the only detection was hook-side self-reporting via `POST /alerts` — which only works when the hook fires AND the watcher is still alive. This bridge-side check catches the case where the watcher is dead and the hook can't detect it.
+
+**Design:**
+- `_watchdog_jsonl_staleness_check()`: iterates registered workers, filters to BUSY_TOOL/BUSY_THINKING states, resolves JSONL path via `_resolve_transcript_path()`, checks file mtime.
+- Skips remote workers (can't stat their JSONL locally), skips workers busy <5min (normal warm-up).
+- Uses `_emit_alert()` for delivery (Telegram + relay). One alert per stale episode with 10min cooldown.
+- Module-level state: `_jsonl_stale_last_alert` (cooldown), `_jsonl_stale_alerted` (dedup set). Clears when worker goes non-BUSY or JSONL freshens.
+- 6 new tests covering: alert fires, ready skip, remote skip, fresh skip, cooldown, state clear.
+
 ### v0.52.5 - Fix missing 👀 reactions + GitHub connector --since format
 
 **Bug 1 — Missing 👀 reactions:** The 👀 emoji reaction (visual confirmation that a message was received by the bridge) was suppressed when a worker was mid-turn. The reaction was gated on `tmux_prompt_empty()`, so busy workers never got reactions — managers couldn't tell if messages were delivered. Fix: always send 👀 when `send_ok` is true, regardless of worker prompt state.
