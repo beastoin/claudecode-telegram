@@ -1,5 +1,11 @@
 ## Changelog
 
+### v0.52.9 - Prevent startup crash on SSH timeout to remote hosts
+
+`_discover_and_configure_sessions()` called `tmux_exists()` per remote worker without a try/except. When Mac Mini SSH timed out, the unhandled `TimeoutExpired` exception crashed the entire bridge startup — same pattern as the watchdog bug fixed in v0.52.8 but in the startup path.
+
+**Fix:** Wrap the `tmux_exists()` call in a try/except for `TimeoutExpired`, `SubprocessError`, and `OSError`. SSH failures are logged as warnings and the worker is still registered from the registry — the bridge starts and serves HTTP even when remote hosts are unreachable.
+
 ### v0.52.8 - Skip downed hosts in watchdog SSH probes + SIGUSR1 safety
 
 **Root cause of watchdog stall:** `_watchdog_probe_remote_hosts()` made SSH calls to ALL remote hosts every cycle, even those already marked DOWN via `host_health.down[host]`. Each SSH timeout blocks ~10s. With 4+ SSH calls per host per cycle (probe, _get_claude_pid per worker, _ps_stats, _capture_pane_text), total blocking exceeded 7 minutes — the watchdog couldn't complete its cycle.

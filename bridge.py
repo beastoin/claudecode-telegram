@@ -10833,11 +10833,14 @@ def _discover_and_configure_sessions() -> dict[str, TmuxSessionDict]:
             if not backend_obj.is_interactive:
                 ensure_worker_pipe(name)
             host = info.get("host") or get_worker_host(name)
-            if tmux_exists(tmux_name, host=host):
-                try:
-                    export_hook_env(tmux_name, backend_name, host=host)
-                except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as exc:
-                    _log(_LOG_WARN, "bridge", f"export_hook_env failed for {name}: {exc}")
+            try:
+                if tmux_exists(tmux_name, host=host):
+                    try:
+                        export_hook_env(tmux_name, backend_name, host=host)
+                    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as exc:
+                        _log(_LOG_WARN, "bridge", f"export_hook_env failed for {name}: {exc}")
+            except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as exc:
+                _log(_LOG_WARN, "bridge", f"tmux_exists check failed for {name} on {host}: {exc}")
     return registered
 
 
