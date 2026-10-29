@@ -1,4 +1,5 @@
 """Tests migrated from test.sh — teleport category."""
+import json
 import pytest
 
 
@@ -1906,3 +1907,187 @@ def test_checkin_cwd_restart_uses_remote_for_teleported():
     assert remote_restart_calls[0]['host'] == 'mac-mini', f'Should target mac-mini: {remote_restart_calls[0]}'
 
     shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# --- POST /teleport API tests ---
+
+
+class FakeTeleportHandler:
+    """Minimal Handler mock for testing POST /teleport."""
+
+    def __init__(self):
+        self.status = None
+        self.response_body = None
+
+    def _send_json(self, code, data):
+        self.status = code
+        self.response_body = data
+
+    def _send_text(self, code, text):
+        self.status = code
+        self.response_body = text
+
+
+def test_teleport_api_missing_name():
+    """POST /teleport with no name returns 400."""
+    import bridge
+
+    handler = FakeTeleportHandler()
+    body = json.dumps({"target": "macmini"}).encode()
+    bridge.handle_teleport_endpoint(handler, body)
+    assert handler.status == 400
+    assert "name" in str(handler.response_body).lower()
+
+
+def test_teleport_api_missing_target():
+    """POST /teleport with no target returns 400."""
+    import bridge
+
+    handler = FakeTeleportHandler()
+    body = json.dumps({"name": "hal"}).encode()
+    bridge.handle_teleport_endpoint(handler, body)
+    assert handler.status == 400
+    assert "target" in str(handler.response_body).lower()
+
+
+def test_teleport_api_unknown_worker():
+    """POST /teleport for unregistered worker returns 404."""
+    from unittest.mock import patch, MagicMock
+    import bridge
+
+    handler = FakeTeleportHandler()
+    body = json.dumps({"name": "nonexistent", "target": "macmini"}).encode()
+    with patch.object(bridge, '_wm') as mock_wm:
+        mock_wm.return_value.get_registered_sessions.return_value = {}
+        bridge.handle_teleport_endpoint(handler, body)
+    assert handler.status == 404
+
+
+def test_teleport_api_resolves_machine_catalog():
+    """POST /teleport resolves catalog names (e.g. 'macmini' -> SSH target)."""
+    from unittest.mock import patch, MagicMock
+    import bridge
+
+    handler = FakeTeleportHandler()
+    body = json.dumps({"name": "hal", "target": "macmini"}).encode()
+
+    mock_machine = MagicMock()
+    mock_machine.ssh_target = "beastoin-agents-f1-mac-mini"
+
+    with patch.object(bridge, '_wm') as mock_wm, \
+         patch.object(bridge, 'get_machine_catalog', return_value={"macmini": mock_machine}), \
+         patch.object(bridge, 'get_worker_host', return_value=None), \
+         patch.object(bridge, 'get_worker_backend', return_value="claude"), \
+         patch.object(bridge, '_teleport_preflight_common') as mock_preflight, \
+         patch.object(bridge, '_remote_run') as mock_remote, \
+         patch.object(bridge, 'run_teleport_preflight', return_value=[]), \
+         patch.object(bridge, 'do_teleport') as mock_tp, \
+         patch('threading.Thread') as mock_thread, \
+         patch.object(bridge, 'get_claude_session_cwd', return_value="/home/claude/omi-hal"), \
+         patch.object(bridge, 'get_manager_chat_id', return_value=123), \
+         patch.object(bridge, 'send_telegram_message'):
+        mock_wm.return_value.get_registered_sessions.return_value = {"hal": {"tmux": "claude-prod-hal"}}
+        mock_wm.return_value.tmux_prefix = "claude-prod-"
+        mock_preflight.return_value = {"tmux": "claude-prod-hal", "backend": "claude"}
+        mock_remote.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        bridge.handle_teleport_endpoint(handler, body)
+
+    assert handler.status == 200
+    assert mock_thread.called
+    thread_kwargs = mock_thread.call_args
+    assert "beastoin-agents-f1-mac-mini" in str(thread_kwargs)
+
+
+def test_teleport_api_passes_cwd():
+    """POST /teleport with explicit cwd passes it to do_teleport."""
+    from unittest.mock import patch, MagicMock
+    import bridge
+
+    handler = FakeTeleportHandler()
+    body = json.dumps({
+        "name": "hal",
+        "target": "macmini",
+        "cwd": "/Users/beastoinagents/omi-hal"
+    }).encode()
+
+    mock_machine = MagicMock()
+    mock_machine.ssh_target = "beastoin-agents-f1-mac-mini"
+
+    thread_args = []
+
+    def capture_thread(*args, **kwargs):
+        thread_args.append(kwargs)
+        mock_t = MagicMock()
+        return mock_t
+
+    with patch.object(bridge, '_wm') as mock_wm, \
+         patch.object(bridge, 'get_machine_catalog', return_value={"macmini": mock_machine}), \
+         patch.object(bridge, 'get_worker_host', return_value=None), \
+         patch.object(bridge, 'get_worker_backend', return_value="claude"), \
+         patch.object(bridge, '_teleport_preflight_common') as mock_preflight, \
+         patch.object(bridge, '_remote_run') as mock_remote, \
+         patch.object(bridge, 'run_teleport_preflight', return_value=[]), \
+         patch('threading.Thread', side_effect=capture_thread), \
+         patch.object(bridge, 'get_claude_session_cwd', return_value="/home/claude/omi-hal"), \
+         patch.object(bridge, 'get_manager_chat_id', return_value=123), \
+         patch.object(bridge, 'send_telegram_message'):
+        mock_wm.return_value.get_registered_sessions.return_value = {"hal": {"tmux": "claude-prod-hal"}}
+        mock_wm.return_value.tmux_prefix = "claude-prod-"
+        mock_preflight.return_value = {"tmux": "claude-prod-hal", "backend": "claude"}
+        mock_remote.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        bridge.handle_teleport_endpoint(handler, body)
+
+    assert handler.status == 200
+    assert len(thread_args) > 0
+    tp_args = thread_args[0].get("args", ())
+    assert "/Users/beastoinagents/omi-hal" in str(tp_args)
+
+
+def test_teleport_api_preflight_failure():
+    """POST /teleport returns 412 when preflight fails."""
+    from unittest.mock import patch, MagicMock
+    import bridge
+
+    handler = FakeTeleportHandler()
+    body = json.dumps({"name": "hal", "target": "mac"}).encode()
+
+    with patch.object(bridge, '_wm') as mock_wm, \
+         patch.object(bridge, 'get_machine_catalog', return_value={}), \
+         patch.object(bridge, 'get_worker_host', return_value=None), \
+         patch.object(bridge, 'get_worker_backend', return_value="claude"), \
+         patch.object(bridge, '_teleport_preflight_common') as mock_preflight, \
+         patch.object(bridge, '_remote_run') as mock_remote, \
+         patch.object(bridge, 'run_teleport_preflight', return_value=["FAIL: only 0.5GB free"]), \
+         patch.object(bridge, 'get_claude_session_cwd', return_value="/home/claude/omi-hal"), \
+         patch.object(bridge, 'get_manager_chat_id', return_value=123), \
+         patch.object(bridge, 'send_telegram_message'):
+        mock_wm.return_value.get_registered_sessions.return_value = {"hal": {"tmux": "claude-prod-hal"}}
+        mock_wm.return_value.tmux_prefix = "claude-prod-"
+        mock_preflight.return_value = {"tmux": "claude-prod-hal", "backend": "claude"}
+        mock_remote.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        bridge.handle_teleport_endpoint(handler, body)
+
+    assert handler.status == 412
+    assert "preflight" in str(handler.response_body).lower()
+
+
+def test_teleport_api_target_unreachable():
+    """POST /teleport returns 502 when target host is unreachable."""
+    from unittest.mock import patch, MagicMock
+    import bridge
+
+    handler = FakeTeleportHandler()
+    body = json.dumps({"name": "hal", "target": "deadhost"}).encode()
+
+    with patch.object(bridge, '_wm') as mock_wm, \
+         patch.object(bridge, 'get_machine_catalog', return_value={}), \
+         patch.object(bridge, 'get_worker_host', return_value=None), \
+         patch.object(bridge, 'get_worker_backend', return_value="claude"), \
+         patch.object(bridge, '_teleport_preflight_common') as mock_preflight, \
+         patch.object(bridge, '_remote_run') as mock_remote, \
+         patch.object(bridge, 'get_claude_session_cwd', return_value="/home/claude/omi-hal"):
+        mock_wm.return_value.get_registered_sessions.return_value = {"hal": {"tmux": "claude-prod-hal"}}
+        mock_wm.return_value.tmux_prefix = "claude-prod-"
+        mock_preflight.return_value = {"tmux": "claude-prod-hal", "backend": "claude"}
+        mock_remote.return_value = MagicMock(returncode=1, stdout="", stderr="connection refused")
+        bridge.handle_teleport_endpoint(handler, body)

@@ -8943,6 +8943,63 @@ def cmd_teleport(router: object, arg: str, chat_id: ChatId, check_only: bool = F
     return True
 
 
+def handle_teleport_endpoint(handler: Handler, body: bytes = b"") -> None:
+    """POST /teleport — worker self-service teleport API.
+
+    Body: {"name": "<worker>", "target": "<host>", "cwd": "<optional target cwd>"}
+    Worker-tier: no admin secret needed. Worker teleports itself.
+    """
+    try:
+        data = json.loads(body) if body else {}
+    except (json.JSONDecodeError, ValueError):
+        handler._send_json(400, {"error": "Invalid JSON"})
+        return
+    name = _str_field(data, "name")
+    target = _str_field(data, "target")
+    if not name:
+        handler._send_json(400, {"error": "Missing required field: name"})
+        return
+    if not target:
+        handler._send_json(400, {"error": "Missing required field: target"})
+        return
+    name = name.lower()
+    target_cwd = _str_field(data, "cwd") or ""
+    registered = _wm().get_registered_sessions()
+    if name not in registered:
+        handler._send_json(404, {"error": f"Worker '{name}' not found"})
+        return
+    machines = get_machine_catalog()
+    target_host = target
+    if target in machines:
+        machine = machines[target]
+        if machine.ssh_target:
+            target_host = machine.ssh_target
+    backend_name = get_worker_backend(name, registered[name])
+    r = _remote_run(["echo", "ok"], host=target_host, timeout=TIMEOUT_REMOTE_CMD)
+    if r.returncode != 0:
+        handler._send_json(502, {"error": f"Cannot reach {target_host} via SSH"})
+        return
+    preflight_fails = run_teleport_preflight(target_host, name, backend_name)
+    if preflight_fails:
+        handler._send_json(412, {"error": "Preflight failed", "failures": preflight_fails})
+        return
+    if not target_cwd:
+        source_cwd = get_claude_session_cwd(name) or ""
+        if source_cwd:
+            target_cwd = claudecode._remap_path(source_cwd, target_host)
+    chat_id = get_manager_chat_id(name)
+    if chat_id is not None:
+        send_telegram_message(chat_id, f"Teleporting {name} to {target_host}... (self-service API)")
+    _log(_LOG_INFO, "teleport-api", f"{name}: target={target_host}, cwd={target_cwd}")
+    threading.Thread(
+        target=do_teleport,
+        args=(name, target_host, target_cwd, False, chat_id, _wm()),
+        name=f"teleport-{name}",
+        daemon=True,
+    ).start()
+    handler._send_json(200, {"status": "teleporting", "worker": name, "target": target_host, "cwd": target_cwd})
+
+
 def cmd_alert(router: object, arg: str, chat_id: ChatId) -> bool:
     """Manage health alerts: /alert [status|snooze <signal>|history]"""
     parts = arg.strip().split()
@@ -10146,6 +10203,7 @@ def _setup_endpoint_routes() -> None:
     r.add(P, "/channels", lambda h, b, _m: h.handle_channel_create(b))
     r.add(P, "/alerts", lambda h, b, _m: h.handle_health_alert(b))
     r.add(P, "/connectors/restarts", lambda h, b, _m: h.handle_connectors_restart(b))
+    r.add(P, "/teleport", lambda h, b, _m: handle_teleport_endpoint(h, b))
     r.add_pattern(P, r"^/guests/send", lambda h, b, m: h.handle_guest_send(b))
     r.add_pattern(P, r"^/guests/reply", lambda h, b, m: h.handle_guest_reply(b))
     r.add_pattern(P, r"^/channels/([^/]+)/members$", lambda h, b, m: h.handle_channel_members(_mg(m), b))
@@ -10627,6 +10685,7 @@ API_ENDPOINTS = {
     "POST /workers": "Worker registration (name, host, version, tools, callback_url)",
     "GET /connectors": "Connector status (gmail, github — running, failures, config)",
     "POST /connectors/restarts": "Restart a connector: {name: 'gmail'|'github'}",
+    "POST /teleport": "Worker self-teleport: {name, target, cwd?} — worker moves itself to another host",
     # PR review endpoints (comments, files, merges) removed — served by review/src/serve.ts
     "GET /guests": "List active guest sessions",
     "POST /guests": "Register a temporary guest agent session",

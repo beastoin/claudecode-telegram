@@ -1,5 +1,28 @@
 ## Changelog
 
+### v0.52.13 - Worker self-service teleport API
+
+New `POST /teleport` endpoint lets workers teleport themselves to another host without manager intervention.
+
+**Endpoint:** `POST /teleport` with JSON body `{"name": "<worker>", "target": "<host>", "cwd": "<optional target cwd>"}`
+
+**Features:**
+- Worker-tier access (no admin secret required)
+- Resolves machine catalog names (e.g. `macmini` → `beastoin-agents-f1-mac-mini`)
+- Auto-remaps CWD from source to target home directory (`/home/claude/X` → `/Users/beastoinagents/X`)
+- Falls back to saved CWD from checkin/registry when no explicit CWD provided
+- Runs full preflight checks before proceeding
+- Notifies manager in Telegram with progress
+- Returns 400 (missing fields), 404 (unknown worker), 412 (preflight failed), 502 (target unreachable), or 200 (teleporting)
+- 7 new tests, 364 FAST total, 0 failures
+
+**Worker usage:**
+```bash
+curl -s -X POST "$BRIDGE_URL/teleport" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "hal", "target": "macmini"}'
+```
+
 ### v0.52.12 - Worker-cycle alerts skip worker relay
 
 Worker lifecycle alerts (state changes, JSONL staleness) now go to Telegram admin ONLY — they no longer relay to worker sessions via `_send_health_alert`. Manager directive: worker-cycle alerts are operational noise for workers.
