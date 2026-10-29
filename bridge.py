@@ -18,6 +18,7 @@ import http.client
 import http.server
 import json
 import os
+import random
 import re
 import secrets
 import shlex
@@ -3177,6 +3178,11 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
             for o in details["options"]:
                 parts.append(f"{'➔ ' if o.get('selected') else '  '}{o['num']}. {o['label']}")
             parts.append(f'\nReply 1-{max(o["num"] for o in details["options"])} to choose, or "skip" to cancel.')
+            host = get_worker_host(name)
+            tmux_name = f"{TMUX_PREFIX}{name}"
+            token, pin = _create_approval_token(name, tmux_name, details, host)
+            base = BRIDGE_PUBLIC_URL or f"http://localhost:{PORT}"
+            parts.append(f"\nPIN: {pin}  {base}/approve/{token}")
         text = "\n".join(parts)
     elif state == "STUCK":
         age_match = re.search(r"age=(\d+)s", reason)
@@ -5949,7 +5955,9 @@ class WorkerManager:
             f"NAME PREFIX: Always prefix your name in messages (e.g., '{name}: your message'). "
             f"REFRESH INSTRUCTIONS: Run `curl -s $BRIDGE_URL/checkin?name={name}` to re-read these instructions anytime. "
             f'WORKING DIRECTORY: To switch project directory (reloads CLAUDE.md), run `curl -s "$BRIDGE_URL/checkin?name={name}&cwd=/path/to/project"`. '
-            "BRIDGE API: Available endpoints: GET /workers, GET /checkin. Messages from manager arrive as prompts — there is NO polling endpoint. "
+            f"BRIDGE API: {_worker_api_summary()}. "
+            f'Run `curl -s "$BRIDGE_URL/?describe&tier=worker"` for full docs. '
+            "Messages from manager arrive as prompts — there is NO polling endpoint. "
             "WARNING: Do NOT output worker messages normally — they go to Telegram. Use the send commands from /workers instead."
         )
         if not backend_obj.is_interactive:
@@ -9892,8 +9900,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_error_json(self, code: int, message: str) -> None:
-        self._send_json(code, {"ok": False, "error": message})
+    def _send_error_json(self, code: int, message: str, *, error_code: str = "", suggestion: str = "") -> None:
+        payload: dict[str, object] = {"ok": False, "error": message}
+        if error_code:
+            payload["code"] = error_code
+        if suggestion:
+            payload["suggestion"] = suggestion
+        self._send_json(code, payload)
 
     def _send_text(self, code: int, text: str) -> None:
         body = text.encode()
@@ -9906,14 +9919,51 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(
             404,
             {
+                "ok": False,
                 "error": f"Unknown endpoint: {method} {path}",
+                "code": "UNKNOWN_ENDPOINT",
+                "hint": "GET /?describe for full API docs, or GET /?describe&tier=worker for worker APIs",
                 "available_endpoints": API_ENDPOINTS,
-                "hint": "Messages from manager arrive as prompts. There is no polling endpoint.",
             },
+        )
+
+    def _handle_describe(self, method: str, path: str, tier_filter: str = "") -> None:
+        if path == "/":
+            endpoints = {}
+            for key, schema in ENDPOINT_REGISTRY.items():
+                if tier_filter and schema.get("tier") != tier_filter:
+                    continue
+                endpoints[key] = schema
+            self._send_json(200, {"endpoints": endpoints, "count": len(endpoints)})
+            return
+        exact = f"{method} {path}"
+        if exact in ENDPOINT_REGISTRY:
+            schema = dict(ENDPOINT_REGISTRY[exact])
+            schema["endpoint"] = exact
+            self._send_json(200, schema)
+            return
+        for key, schema in ENDPOINT_REGISTRY.items():
+            km, kp = key.split(" ", 1)
+            if "<" in kp:
+                pat = re.sub(r"<[^>]+>", r"[^/]+", kp)
+                if km == method and re.match(f"^{pat}$", path):
+                    result = dict(schema)
+                    result["endpoint"] = key
+                    self._send_json(200, result)
+                    return
+        self._send_error_json(
+            404,
+            f"No schema for {method} {path}",
+            error_code="ENDPOINT_NOT_FOUND",
+            suggestion="GET /?describe for all endpoints",
         )
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        if "describe" in qs or parsed.query == "describe":
+            self._handle_describe("POST", parsed.path, tier_filter=qs.get("tier", [""])[0])
+            return
         handler, match = _endpoint_router.resolve("POST", parsed.path)  # type: ignore[union-attr]
         if handler:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -10067,6 +10117,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        if "describe" in qs or parsed.query == "describe":
+            self._handle_describe("GET", parsed.path, tier_filter=qs.get("tier", [""])[0])
+            return
         handler, match = _endpoint_router.resolve("GET", parsed.path)  # type: ignore[union-attr]
         if handler:
             handler(self, parsed, match)  # type: ignore[operator]
@@ -10191,6 +10245,220 @@ def _mg2(m: re.Match[str] | None) -> str | None:
     return m.group(2) if m else None
 
 
+def _worker_api_summary() -> str:
+    return ", ".join(sorted(k for k, v in ENDPOINT_REGISTRY.items() if v.get("tier") == "worker"))
+
+
+def handle_doctor_endpoint(handler: Handler, params: dict[str, str]) -> None:
+    name = params.get("name", "").strip()
+    if not name:
+        handler._send_error_json(
+            400, "Missing required parameter: name", error_code="MISSING_PARAM", suggestion="GET /doctor?name=<worker>"
+        )
+        return
+    sessions = worker_manager.get_registered_sessions()  # type: ignore[attr-defined]
+    if name not in sessions:
+        handler._send_error_json(
+            404,
+            f"Worker '{name}' not found",
+            error_code="WORKER_NOT_FOUND",
+            suggestion="GET /workers to see active workers",
+        )
+        return
+    reg = sessions[name]
+    host = get_worker_host(name)
+    is_remote = host is not None
+    tmux_name = reg.get("tmux_name", f"claude-prod-{name}")
+    checks: list[dict[str, str]] = []
+
+    checks.append({"name": "registered", "status": "ok", "message": f"Worker '{name}' in registry"})
+
+    checks.append({"name": "bridge_reachable", "status": "ok", "message": "Bridge responded to this request"})
+
+    if is_remote:
+        checks.append(
+            {"name": "session_alive", "status": "skipped", "message": f"Remote worker on {host} — tmux check skipped"}
+        )
+    else:
+        alive = claudecode.tmux_exists(tmux_name)
+        checks.append(
+            {
+                "name": "session_alive",
+                "status": "ok" if alive else "fail",
+                "message": f"tmux {tmux_name} {'exists' if alive else 'NOT FOUND'}",
+            }
+        )
+
+    session_dir = SESSIONS_DIR / name
+    chat_id_file = session_dir / "chat_id"
+    if session_dir.exists() and chat_id_file.exists():
+        checks.append({"name": "session_dir", "status": "ok", "message": f"Session dir and chat_id present"})
+    else:
+        checks.append(
+            {
+                "name": "session_dir",
+                "status": "fail",
+                "message": f"Missing: {'session dir' if not session_dir.exists() else 'chat_id file'}",
+            }
+        )
+
+    cwd = get_claude_session_cwd(name)
+    if cwd:
+        if is_remote:
+            checks.append({"name": "cwd_valid", "status": "skipped", "message": f"Remote CWD: {cwd}"})
+        elif os.path.isdir(cwd):
+            checks.append({"name": "cwd_valid", "status": "ok", "message": f"CWD accessible: {cwd}"})
+        else:
+            checks.append({"name": "cwd_valid", "status": "fail", "message": f"CWD not accessible: {cwd}"})
+    else:
+        checks.append({"name": "cwd_valid", "status": "fail", "message": "No CWD recorded"})
+
+    backend = reg.get("backend", "unknown")
+    checks.append({"name": "backend_match", "status": "ok", "message": f"Backend: {backend}"})
+
+    passed = sum(1 for c in checks if c["status"] == "ok")
+    failed = sum(1 for c in checks if c["status"] == "fail")
+    warned = sum(1 for c in checks if c["status"] == "warn")
+    skipped = sum(1 for c in checks if c["status"] == "skipped")
+    all_ok = failed == 0
+
+    handler._send_json(
+        200,
+        {
+            "worker": name,
+            "ok": all_ok,
+            "checks": checks,
+            "passed": passed,
+            "failed": failed,
+            "warned": warned,
+            "skipped": skipped,
+            "suggestion": None if all_ok else "Run GET /workers to verify worker state",
+        },
+    )
+
+
+_approval_tokens: dict[str, dict] = {}
+
+
+def _create_approval_token(worker: str, tmux_name: str, details: QuestionDetails, host: str | None) -> tuple[str, str]:
+    token = secrets.token_hex(4)
+    pin = str(random.randint(1000, 9999))
+    _approval_tokens[token] = {
+        "worker": worker,
+        "tmux_name": tmux_name,
+        "details": details,
+        "host": host,
+        "pin": pin,
+        "created": time.time(),
+        "used": False,
+        "attempts": 0,
+    }
+    return token, pin
+
+
+def handle_approval_get(handler: Handler, token: str) -> None:
+    entry = _approval_tokens.get(token)
+    if not entry or entry.get("used"):
+        handler._send_error_json(410, "Token expired or already used", error_code="TOKEN_GONE")
+        return
+    if time.time() - float(entry["created"]) > 300:
+        handler._send_error_json(410, "Token expired (5 minute limit)", error_code="TOKEN_EXPIRED")
+        return
+    details = entry["details"]
+    worker = entry["worker"]
+    header = details.get("header", "") if details else "Permission prompt"
+    options = details.get("options", []) if details else []
+    buttons_html = ""
+    for o in options:
+        sel = " selected" if o.get("selected") else ""
+        buttons_html += f'<button class="opt{sel}" data-num="{o["num"]}">{o["num"]}. {o["label"]}</button>\n'
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{worker} — Approval</title>
+<style>
+body{{font-family:system-ui;max-width:480px;margin:2em auto;padding:0 1em;background:#1a1a2e;color:#e0e0e0}}
+h2{{color:#fff;margin-bottom:.3em}}
+.header{{background:#16213e;padding:1em;border-radius:8px;margin-bottom:1em}}
+.pin-row{{display:flex;gap:.5em;margin-bottom:1em;align-items:center}}
+.pin-row input{{flex:1;font-size:1.5em;padding:.4em;border-radius:6px;border:2px solid #333;background:#0f0f23;color:#fff;text-align:center;letter-spacing:.3em}}
+.opt{{display:block;width:100%;padding:1em;margin:.5em 0;font-size:1.1em;border:2px solid #333;border-radius:8px;background:#16213e;color:#e0e0e0;cursor:pointer}}
+.opt:disabled{{opacity:.4;cursor:not-allowed}}
+.opt.selected{{border-color:#4fc3f7;background:#1a3a5c}}
+.opt:hover:not(:disabled){{background:#1e3a5e}}
+.skip{{display:block;width:100%;padding:.8em;margin-top:1em;font-size:1em;border:1px solid #555;border-radius:8px;background:transparent;color:#999;cursor:pointer}}
+.result{{padding:1em;border-radius:8px;margin-top:1em;text-align:center;font-size:1.2em;display:none}}
+.result.ok{{display:block;background:#1b5e20;color:#a5d6a7}}
+.result.err{{display:block;background:#b71c1c;color:#ef9a9a}}
+</style></head><body>
+<div class="header"><h2>{worker}</h2><p>{header}</p></div>
+<div class="pin-row"><label>PIN:</label><input type="text" id="pin" maxlength="4" pattern="[0-9]{{4}}" inputmode="numeric" placeholder="····" autocomplete="off"></div>
+{buttons_html}
+<button class="skip" onclick="doChoice('skip')">Skip / Cancel</button>
+<div id="result" class="result"></div>
+<script>
+var pin=document.getElementById('pin'),res=document.getElementById('result');
+document.querySelectorAll('.opt').forEach(function(b){{b.disabled=true;b.addEventListener('click',function(){{doChoice(b.dataset.num)}});}});
+pin.addEventListener('input',function(){{var ok=pin.value.length===4;document.querySelectorAll('.opt').forEach(function(b){{b.disabled=!ok}});}});
+function doChoice(c){{
+  var p=pin.value;if(c!=='skip'&&p.length!==4)return;
+  var x=new XMLHttpRequest();x.open('POST',location.href);x.setRequestHeader('Content-Type','application/json');
+  x.onload=function(){{
+    var d=JSON.parse(x.responseText);
+    if(d.ok){{res.className='result ok';res.textContent='Approved: option '+c;document.querySelectorAll('.opt,.skip').forEach(function(b){{b.disabled=true}});}}
+    else{{res.className='result err';res.textContent=d.error||'Failed';}}
+  }};
+  x.onerror=function(){{res.className='result err';res.textContent='Network error';}};
+  x.send(JSON.stringify({{choice:parseInt(c)||0,pin:p}}));
+}}
+</script></body></html>"""
+    body = html.encode()
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/html")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def handle_approval_post(handler: Handler, token: str, data: dict[str, object]) -> None:
+    entry = _approval_tokens.get(token)
+    if not entry:
+        handler._send_error_json(410, "Token not found or invalidated", error_code="TOKEN_GONE")
+        return
+    if entry.get("used"):
+        handler._send_error_json(410, "Token already used", error_code="TOKEN_USED")
+        return
+    if time.time() - float(entry["created"]) > 300:
+        handler._send_error_json(410, "Token expired (5 minute limit)", error_code="TOKEN_EXPIRED")
+        return
+    attempts = int(entry.get("attempts", 0))
+    if attempts >= 3:
+        handler._send_error_json(403, "Token invalidated after 3 wrong PIN attempts", error_code="TOKEN_LOCKED")
+        return
+    pin = str(data.get("pin", ""))
+    if pin != entry["pin"]:
+        entry["attempts"] = attempts + 1
+        if int(entry["attempts"]) >= 3:
+            _log(_LOG_WARN, "approval", f"Token {token} locked after 3 wrong PIN attempts")
+        handler._send_error_json(
+            403, "Wrong PIN", error_code="WRONG_PIN", suggestion=f"{3 - int(entry['attempts'])} attempts remaining"
+        )
+        return
+    choice = int(data.get("choice", 0))  # type: ignore[call-overload]
+    tmux_name = str(entry["tmux_name"])
+    details: QuestionDetails = entry["details"]
+    host_val = entry.get("host")
+    host = str(host_val) if host_val is not None else None
+    if choice == 0 or str(data.get("choice", "")).lower() == "skip":
+        _send_interactive_reply(tmux_name, "skip", details, host=host)
+        entry["used"] = True
+        handler._send_json(200, {"ok": True, "worker": entry["worker"], "action": "skipped"})
+        return
+    result = _send_interactive_reply(tmux_name, str(choice), details, host=host)
+    entry["used"] = True
+    if result:
+        handler._send_json(200, {"ok": True, "worker": entry["worker"], "choice": choice})
+    else:
+        handler._send_error_json(400, f"Invalid choice: {choice}", error_code="INVALID_CHOICE")
+
+
 def _setup_endpoint_routes() -> None:
     r = _endpoint_router  # type: ignore[assignment]
     P, G, D = "POST", "GET", "DELETE"
@@ -10210,10 +10478,14 @@ def _setup_endpoint_routes() -> None:
     r.add_pattern(P, r"^/channels/([^/]+)/send$", lambda h, b, m: h.handle_channel_send(_mg(m), b))
     r.add_pattern(P, r"^/relay/([^/]+)/send$", lambda h, b, m: h.handle_relay_send(_mg(m), b))
     r.add_pattern(P, r"^/relay/([^/]+)/reply$", lambda h, b, m: h.handle_relay_reply(_mg(m), b))
+    r.add_pattern(
+        P, r"^/approve/([a-f0-9]+)$", lambda h, b, m: handle_approval_post(h, _mg(m), json.loads(b) if b else {})
+    )
     r.add(G, "/guests", lambda h, p, _m: h.handle_guests_list())
     r.add(G, "/workers", lambda h, p, _m: h.handle_workers_endpoint(p))
     r.add(G, "/machines", lambda h, p, _m: h.handle_machines_endpoint(p))
     r.add(G, "/checkin", lambda h, p, _m: h.handle_checkin_endpoint(p))
+    r.add(G, "/doctor", lambda h, p, _m: handle_doctor_endpoint(h, {k: v[0] for k, v in parse_qs(p.query).items()}))
     r.add(G, "/health", lambda h, p, _m: (lambda s: h._send_json(200 if s.get("ok") else 503, s))(health.snapshot()))
     r.add(
         G,
@@ -10245,6 +10517,7 @@ def _setup_endpoint_routes() -> None:
     # PR review file content and keepalive routes removed — served by review/src/serve.ts
     r.add_pattern(G, r"^/guests/inbox", lambda h, p, m: h.handle_guest_inbox(p))
     r.add_pattern(G, r"^/guests/status", lambda h, p, m: h.handle_guest_status(p))
+    r.add_pattern(G, r"^/approve/([a-f0-9]+)$", lambda h, p, m: handle_approval_get(h, _mg(m)))
     r.add_pattern(G, r"^/relay/([^/]+)(?:/(.+))?$", lambda h, p, m: h.handle_relay_get(_mg(m), _mg2(m), p))
     r.add_pattern(G, r"^/channels/([^/]+)/messages$", lambda h, p, m: h.handle_channel_messages(_mg(m), p))
     # transcript endpoint removed — served by spawn-on-demand Bun viewer (rewind/)
@@ -10667,33 +10940,401 @@ class BridgeRuntimeState:
 
 state = BridgeRuntimeState()
 _last_mention = state.mention
-API_ENDPOINTS = {
-    "GET /": "API index — lists all endpoints",
-    "GET /machines": "List configured machines, access hints, workers, and health",
-    "GET /workers": "List active workers with send commands",
-    "GET /checkin?name=<name>": "Refresh worker instructions (optional: &cwd=/path)",
-    "GET /health": "Unified health: all signals, threads, uptime — single source of truth",
-    "GET /health/workers": "Watchdog state for all workers",
-    "GET /health/tunnel": "Tunnel and poll fallback state",
-    "GET /transcript/<name>": "Polished HTML transcript tool for a worker",
-    "GET /transcript/<name>/updates": "Poll for new transcript entries (returns {total, new})",
-    # PR review viewer removed — served by review/src/serve.ts
-    "POST /messages": "Send a prompt to a worker: {worker, message, from}",
-    "POST /outputs": "Hook only: publish this worker's own response to Telegram",
-    "POST /notifications": "Send notification to all admin chats",
-    "POST /alerts": "Hook: JSONL health alert (stale transcript detection)",
-    "POST /workers": "Worker registration (name, host, version, tools, callback_url)",
-    "GET /connectors": "Connector status (gmail, github — running, failures, config)",
-    "POST /connectors/restarts": "Restart a connector: {name: 'gmail'|'github'}",
-    "POST /teleport": "Worker self-teleport: {name, target, cwd?} — worker moves itself to another host",
-    # PR review endpoints (comments, files, merges) removed — served by review/src/serve.ts
-    "GET /guests": "List active guest sessions",
-    "POST /guests": "Register a temporary guest agent session",
-    "DELETE /guests?token=<token>": "Disconnect a guest session",
-    "GET /relay/<channel_id>": "Relay channel guide, messages, status",
-    "POST /relay/<channel_id>/send": "Guest sends message via relay channel",
-    "POST /relay/<channel_id>/reply": "Worker replies via relay channel",
+ENDPOINT_REGISTRY: dict[str, dict[str, object]] = {
+    "GET /": {
+        "description": "API index — lists all endpoints, or rich schemas with ?describe",
+        "tier": "worker",
+        "params": [
+            {"name": "describe", "type": "flag", "description": "Return rich endpoint schemas instead of flat list"},
+            {
+                "name": "tier",
+                "type": "string",
+                "description": "Filter endpoints by tier (worker, hook, guest, channel, relay, admin, read)",
+            },
+        ],
+        "response": {"name": "string", "endpoints": "object", "note": "string"},
+        "auth": "none",
+    },
+    "GET /workers": {
+        "description": "List active workers with send commands",
+        "tier": "worker",
+        "params": [
+            {
+                "name": "from",
+                "type": "string",
+                "description": "Your worker name — adjusts send_example for cross-machine SSH wrapping",
+            },
+        ],
+        "response": {"workers": "array of {name, host, send_example, ...}"},
+        "auth": "none",
+    },
+    "GET /machines": {
+        "description": "List configured machines, access hints, workers, and health",
+        "tier": "worker",
+        "params": [
+            {"name": "from", "type": "string", "description": "Caller worker name"},
+        ],
+        "response": {"machines": "object"},
+        "auth": "none",
+    },
+    "GET /checkin": {
+        "description": "Refresh worker instructions (optional: switch CWD)",
+        "tier": "worker",
+        "params": [
+            {"name": "name", "type": "string", "required": True, "description": "Worker name"},
+            {"name": "cwd", "type": "string", "description": "Switch working directory before checkin"},
+        ],
+        "response": {"text": "plain text welcome message"},
+        "auth": "none",
+    },
+    "GET /health": {
+        "description": "Unified health: all signals, threads, uptime — single source of truth",
+        "tier": "worker",
+        "response": {"ok": "bool", "uptime": "int", "signals": "object", "threads": "object"},
+        "auth": "none",
+    },
+    "GET /doctor": {
+        "description": "Worker self-diagnostics: checks registration, session, CWD, hooks",
+        "tier": "worker",
+        "params": [
+            {"name": "name", "type": "string", "required": True, "description": "Worker name to diagnose"},
+        ],
+        "response": {
+            "worker": "string",
+            "ok": "bool",
+            "checks": "array",
+            "passed": "int",
+            "failed": "int",
+            "warned": "int",
+        },
+        "auth": "none",
+    },
+    "POST /messages": {
+        "description": "Send a prompt to a worker",
+        "tier": "worker",
+        "body": [
+            {"name": "worker", "type": "string", "required": True, "description": "Target worker name"},
+            {
+                "name": "message",
+                "type": "string",
+                "required": True,
+                "description": "Message text (also accepts 'text')",
+            },
+            {"name": "from", "type": "string", "description": "Sender name for attribution"},
+        ],
+        "response": {"ok": "bool", "worker": "string", "delivered": "bool"},
+        "auth": "none",
+        "mutates": True,
+    },
+    "POST /teleport": {
+        "description": "Worker self-teleport: move yourself to another host",
+        "tier": "worker",
+        "body": [
+            {"name": "name", "type": "string", "required": True, "description": "Your worker name"},
+            {
+                "name": "target",
+                "type": "string",
+                "required": True,
+                "description": "Target machine (catalog name like 'macmini' or SSH host)",
+            },
+            {"name": "cwd", "type": "string", "description": "Target CWD (auto-remapped from source if omitted)"},
+        ],
+        "response": {"status": "string", "worker": "string", "target": "string", "cwd": "string"},
+        "auth": "none",
+        "mutates": True,
+        "example": {"name": "hal", "target": "macmini"},
+    },
+    "GET /health/workers": {
+        "description": "Watchdog state for all workers",
+        "tier": "read",
+        "response": {"workers": "object of {name: {state, reason, since, age_sec}}"},
+        "auth": "none",
+    },
+    "GET /health/tunnel": {
+        "description": "Tunnel and poll fallback state",
+        "tier": "read",
+        "response": {"mode": "string", "state": "string", "tunnel_url": "string", "polling_active": "bool"},
+        "auth": "none",
+    },
+    "GET /connectors": {
+        "description": "Connector status (gmail, github — running, failures, config)",
+        "tier": "read",
+        "response": {"gmail": "object", "github": "object"},
+        "auth": "none",
+    },
+    "GET /alerts": {
+        "description": "Alert status, active alerts, snooze timers",
+        "tier": "read",
+        "response": {"status": "string", "active": "object", "snoozed": "object"},
+        "auth": "none",
+    },
+    "POST /outputs": {
+        "description": "Hook only: publish this worker's own response to Telegram",
+        "tier": "hook",
+        "body": [
+            {"name": "session", "type": "string", "required": True, "description": "tmux session name"},
+            {"name": "text", "type": "string", "required": True, "description": "Response text"},
+            {
+                "name": "source",
+                "type": "string",
+                "required": True,
+                "description": "Must match session (anti-impersonation)",
+            },
+            {"name": "session_id", "type": "string", "description": "Claude session ID"},
+            {"name": "escape", "type": "bool", "description": "HTML-escape the text"},
+        ],
+        "response": {"text": "OK"},
+        "auth": "source_validation",
+        "notes": "Source must match session — prevents workers from impersonating others",
+    },
+    "POST /alerts": {
+        "description": "Hook: JSONL health alert (stale transcript detection)",
+        "tier": "hook",
+        "body": [
+            {"name": "worker", "type": "string", "description": "Worker name"},
+            {"name": "issue", "type": "string", "description": "Issue description"},
+            {"name": "transcript_age", "type": "int", "description": "Seconds since last transcript update"},
+        ],
+        "response": {"ok": "bool"},
+        "auth": "none",
+    },
+    "POST /notifications": {
+        "description": "Send notification to all admin chats",
+        "tier": "admin",
+        "body": [
+            {"name": "text", "type": "string", "required": True, "description": "Notification text"},
+            {"name": "name", "type": "string", "description": "Sender name"},
+        ],
+        "response": {"text": "Sent to N chats"},
+        "auth": "none",
+        "mutates": True,
+    },
+    "POST /workers": {
+        "description": "Worker registration (forge or callback)",
+        "tier": "admin",
+        "body": [
+            {"name": "name", "type": "string", "required": True, "description": "Worker name"},
+            {"name": "host", "type": "string", "description": "Worker host"},
+            {"name": "version", "type": "string", "description": "Worker version"},
+            {"name": "callback_url", "type": "string", "description": "Callback URL for non-tmux workers"},
+            {"name": "tools", "type": "array", "description": "Available tools list"},
+        ],
+        "response": {"ok": "bool", "settings": "object"},
+        "auth": "none",
+        "mutates": True,
+    },
+    "POST /connectors/restarts": {
+        "description": "Restart a connector",
+        "tier": "admin",
+        "body": [
+            {"name": "name", "type": "string", "required": True, "description": "'gmail' or 'github'"},
+        ],
+        "response": {"ok": "bool", "name": "string", "message": "string"},
+        "auth": "none",
+        "mutates": True,
+    },
+    "POST /alerts/snooze": {
+        "description": "Snooze a specific health alert signal",
+        "tier": "admin",
+        "body": [
+            {"name": "signal", "type": "string", "required": True, "description": "Alert signal name to snooze"},
+            {"name": "duration", "type": "int", "description": "Snooze duration in seconds (default: 1800)"},
+        ],
+        "response": {"result": "string"},
+        "auth": "none",
+        "mutates": True,
+    },
+    "GET /guests": {
+        "description": "List active guest sessions",
+        "tier": "guest",
+        "response": {"ok": "bool", "guests": "array of {name, expires, connected_workers}"},
+        "auth": "none",
+    },
+    "POST /guests": {
+        "description": "Register a temporary guest agent session",
+        "tier": "guest",
+        "body": [
+            {"name": "name", "type": "string", "description": "Guest name (auto-generated if omitted)"},
+        ],
+        "response": {
+            "ok": "bool",
+            "name": "string",
+            "token": "string",
+            "expires": "string",
+            "inbox_url": "string",
+            "send_url": "string",
+        },
+        "auth": "none",
+        "mutates": True,
+    },
+    "DELETE /guests": {
+        "description": "Disconnect a guest session",
+        "tier": "guest",
+        "params": [
+            {"name": "token", "type": "string", "required": True, "description": "Guest session token"},
+        ],
+        "response": {"ok": "bool", "name": "string"},
+        "auth": "token",
+    },
+    "GET /guests/inbox": {
+        "description": "Poll guest inbox for messages",
+        "tier": "guest",
+        "params": [
+            {"name": "token", "type": "string", "required": True, "description": "Guest token"},
+            {"name": "after", "type": "string", "description": "Message ID to start after"},
+        ],
+        "response": {"ok": "bool", "name": "string", "messages": "array"},
+        "auth": "token",
+    },
+    "POST /guests/send": {
+        "description": "Guest sends message to worker(s), channel(s), or other guests",
+        "tier": "guest",
+        "body": [
+            {"name": "text", "type": "string", "required": True, "description": "Message text"},
+            {
+                "name": "to",
+                "type": "string|array",
+                "required": True,
+                "description": "Target name(s) (also accepts 'worker')",
+            },
+        ],
+        "response": {"ok": "bool", "target": "string", "delivered": "bool"},
+        "auth": "token",
+        "mutates": True,
+    },
+    "POST /guests/reply": {
+        "description": "Worker replies to a guest's inbox",
+        "tier": "guest",
+        "body": [
+            {"name": "guest", "type": "string", "required": True, "description": "Guest name"},
+            {"name": "text", "type": "string", "required": True, "description": "Reply text"},
+            {"name": "from", "type": "string", "description": "Worker name"},
+        ],
+        "response": {"ok": "bool", "message_id": "string"},
+        "auth": "none",
+        "mutates": True,
+    },
+    "GET /guests/status": {
+        "description": "Get guest session status",
+        "tier": "guest",
+        "params": [
+            {"name": "token", "type": "string", "required": True, "description": "Guest token"},
+        ],
+        "response": {"ok": "bool", "name": "string", "expires": "string", "connected_workers": "array"},
+        "auth": "token",
+    },
+    "POST /channels": {
+        "description": "Create a multi-party channel",
+        "tier": "channel",
+        "body": [
+            {"name": "label", "type": "string", "description": "Channel label"},
+            {"name": "members", "type": "array", "required": True, "description": "Member names"},
+            {"name": "include_manager", "type": "bool", "description": "Include manager in channel"},
+            {"name": "ttl_seconds", "type": "int", "description": "Channel time-to-live"},
+        ],
+        "response": {"ok": "bool", "channel": "string", "send_url": "string", "messages_url": "string"},
+        "auth": "token",
+        "mutates": True,
+    },
+    "GET /channels": {
+        "description": "List active channels",
+        "tier": "channel",
+        "params": [
+            {"name": "token", "type": "string", "description": "Guest token (filters by membership)"},
+        ],
+        "response": {"ok": "bool", "channels": "array"},
+        "auth": "token",
+    },
+    "POST /channels/<id>/send": {
+        "description": "Send a message to a channel",
+        "tier": "channel",
+        "body": [
+            {"name": "text", "type": "string", "required": True, "description": "Message text"},
+            {"name": "from", "type": "string", "description": "Sender name"},
+        ],
+        "response": {"ok": "bool", "channel": "string", "message_id": "string", "seq": "int"},
+        "auth": "token",
+        "mutates": True,
+    },
+    "POST /channels/<id>/members": {
+        "description": "Add/remove members from a channel",
+        "tier": "channel",
+        "body": [
+            {"name": "add", "type": "array", "description": "Member names to add"},
+            {"name": "remove", "type": "array", "description": "Member names to remove"},
+        ],
+        "response": {"ok": "bool", "channel": "string", "added": "array", "removed": "array", "members": "array"},
+        "auth": "none",
+        "mutates": True,
+    },
+    "GET /channels/<id>/messages": {
+        "description": "Get messages from a channel",
+        "tier": "channel",
+        "params": [
+            {"name": "after", "type": "string", "description": "Message ID to start after"},
+            {"name": "token", "type": "string", "description": "Guest token"},
+        ],
+        "response": {"ok": "bool", "channel": "string", "messages": "array"},
+        "auth": "token",
+    },
+    "DELETE /channels/<id>": {
+        "description": "Delete/close a channel",
+        "tier": "channel",
+        "response": {"ok": "bool", "channel": "string"},
+        "auth": "none",
+        "mutates": True,
+    },
+    "GET /relay/<channel_id>": {
+        "description": "Relay channel guide, messages, status",
+        "tier": "relay",
+        "params": [
+            {"name": "token", "type": "string", "required": True, "description": "Relay guest token"},
+        ],
+        "response": {"text": "plain text guide"},
+        "auth": "bearer",
+    },
+    "POST /relay/<channel_id>/send": {
+        "description": "Guest sends message via relay channel",
+        "tier": "relay",
+        "body": [
+            {"name": "text", "type": "string", "required": True, "description": "Message text"},
+        ],
+        "response": {"message_id": "string", "delivered": "bool", "workers": "object"},
+        "auth": "bearer",
+        "mutates": True,
+    },
+    "POST /relay/<channel_id>/reply": {
+        "description": "Worker replies via relay channel",
+        "tier": "relay",
+        "body": [
+            {"name": "text", "type": "string", "required": True, "description": "Reply text"},
+        ],
+        "response": {"message_id": "string", "delivered": "bool"},
+        "auth": "bearer",
+        "mutates": True,
+    },
+    "GET /approve/<token>": {
+        "description": "Web approval page for permission prompts (PIN-secured)",
+        "tier": "admin",
+        "response": {"html": "Approval page with clickable buttons"},
+        "auth": "token",
+        "notes": "One-time token, expires in 5 min. PIN sent separately in Telegram.",
+    },
+    "POST /approve/<token>": {
+        "description": "Submit approval choice with PIN verification",
+        "tier": "admin",
+        "body": [
+            {"name": "choice", "type": "int", "required": True, "description": "Option number to select"},
+            {"name": "pin", "type": "string", "required": True, "description": "4-digit PIN from Telegram message"},
+        ],
+        "response": {"ok": "bool", "worker": "string", "choice": "int"},
+        "auth": "token",
+        "mutates": True,
+        "notes": "3 wrong PIN attempts invalidates the token",
+    },
 }
+
+API_ENDPOINTS: dict[str, str] = {k: str(v["description"]) for k, v in ENDPOINT_REGISTRY.items()}
 
 
 def get_worker_host(name: str) -> str | None:

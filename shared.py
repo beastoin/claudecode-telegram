@@ -656,7 +656,7 @@ class RelayChannelDict(TypedDict):
 
 # --- Core ---
 
-VERSION = "0.52.13"
+VERSION = "0.52.14"
 
 
 def _str_field(d: Mapping[str, object], key: str, default: str = "") -> str:

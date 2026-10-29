@@ -1,5 +1,37 @@
 ## Changelog
 
+### v0.52.14 - Agent-friendly bridge API
+
+All 36 HTTP endpoints now have rich schemas, self-description, categorization by consumer tier, and structured error guidance. Workers can discover every available endpoint and diagnose their own setup without reading docs.
+
+**6 new capabilities:**
+
+1. **ENDPOINT_REGISTRY** — rich schema dict replacing flat API_ENDPOINTS. Each entry has tier, params/body, response shape, auth, and examples. 7 consumer tiers: worker, hook, guest, channel, relay, admin, read.
+
+2. **`?describe` introspection** — any endpoint + `?describe` returns its schema instead of executing. `GET /?describe` returns full registry, `GET /?describe&tier=worker` filters by tier, `GET /teleport?describe` returns single endpoint schema.
+
+3. **`GET /doctor?name=<worker>`** — worker self-diagnostics. Checks: registered, bridge_reachable, session_alive (skipped for remote), session_dir, cwd_valid, backend_match. Returns pass/fail/skip counts.
+
+4. **Enhanced error envelope** — `_send_error_json` now supports optional `error_code` and `suggestion` fields alongside existing `ok` + `error`. 404 handler includes describe hint.
+
+5. **Auto-generated checkin note** — worker welcome message now auto-lists all worker-tier endpoints from registry. Adding a new worker endpoint automatically includes it in checkin. Includes `?describe` hint.
+
+6. **Web approval UI** — when a worker hits a permission prompt, Telegram alert now includes a clickable URL + 4-digit PIN. Manager opens URL on phone, sees buttons, enters PIN, taps choice. Split-secret security: token in URL (identifies approval) + PIN in Telegram only (authenticates manager). 3 wrong PIN attempts invalidates token. 5 minute expiry.
+
+**Tests:** 26 new tests (test_api_describe.py), 364 FAST total, 0 failures. Zero mypy errors.
+
+**Worker usage:**
+```bash
+# Discover all worker endpoints
+curl -s "$BRIDGE_URL/?describe&tier=worker" | python3 -m json.tool
+
+# Get schema for a specific endpoint
+curl -s "$BRIDGE_URL/teleport?describe" | python3 -m json.tool
+
+# Self-diagnose
+curl -s "$BRIDGE_URL/doctor?name=hal" | python3 -m json.tool
+```
+
 ### v0.52.13 - Worker self-service teleport API
 
 New `POST /teleport` endpoint lets workers teleport themselves to another host without manager intervention.
