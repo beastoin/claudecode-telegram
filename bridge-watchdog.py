@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""External bridge health watchdog — runs via cron every 2 minutes.
+"""External bridge liveness watchdog — runs via cron every 2 minutes.
 
-Checks the unified /health endpoint. Alerts workers via tmux.
-Falls back to Telegram bot API only when the bridge is completely dead.
+Checks ONLY bridge liveness: process alive + HTTP responding.
+Health signal evaluation (gmail, github, threads, pools) is handled
+exclusively by the internal alert system in bridge.py with routing.
+
+This watchdog exists because only an external process can detect
+bridge death — a dead bridge can't self-report.
 
 Alert lifecycle (state-based, no spam):
-  - New failure detected   → 🔶 alert once
-  - Failure persists       → silent (already alerted)
-  - Failure resolves       → ✅ resolved once, clears state
-  - Bridge dead            → 🚨 Telegram DM (bypasses bridge)
+  - Bridge dead/unresponsive → 🚨 alert once (Telegram DM + tmux)
+  - Bridge recovers          → ✅ resolved once, clears state
 
 State is persisted in .watchdog-state.json between cron runs.
 
@@ -169,68 +171,6 @@ def deliver_to_workers(cfg: Config, msg: str) -> None:
             )
 
 
-# --- Health evaluation ---
-
-
-def collect_problems(cfg: Config, health: dict[str, Any]) -> dict[str, str]:
-    """Extract current problems from health response, filtering snoozed signals."""
-    # Get snoozed signals from bridge's alert system
-    snoozed: set[str] = set()
-    alerts = http_get_json(f"http://127.0.0.1:{cfg.port}/alerts", timeout=3)
-    if "snoozed" in alerts:
-        snoozed = set(alerts["snoozed"].keys())
-
-    problems: dict[str, str] = {}  # key -> human description
-
-    for sig, info in health.get("signals", {}).items():
-        if not info.get("ok") and sig not in snoozed:
-            age = info.get("last_ok_ago_s", "?")
-            errors = info.get("errors", 0)
-            problems[sig] = f"{sig}(age={age}s, errors={errors})"
-
-    for tname, alive in health.get("threads", {}).items():
-        key = f"thread:{tname}"
-        if not alive and key not in snoozed:
-            problems[key] = f"thread {tname} DEAD"
-
-    for pname, pinfo in health.get("pools", {}).items():
-        if isinstance(pinfo, dict):
-            pending = pinfo.get("pending", 0)
-            mx = pinfo.get("max", 1)
-            if pending > mx * 2:
-                problems[f"pool:{pname}"] = f"{pname} saturated ({pending} pending)"
-
-    return problems
-
-
-def reconcile_alerts(
-    state: AlertState,
-    current_problems: dict[str, str],
-    now: float,
-) -> tuple[list[str], list[str]]:
-    """Compare previous state with current problems.
-
-    Returns (new_alerts, resolved_alerts) — only state changes.
-    Unchanged problems are silent (already alerted on previous run).
-    """
-    new_alerts: list[str] = []
-    resolved: list[str] = []
-
-    # Detect resolved: was active, now OK
-    for key in list(state.active):
-        if key not in current_problems:
-            resolved.append(key)
-            del state.active[key]
-
-    # Detect new failures: not previously active
-    for key, desc in current_problems.items():
-        if key not in state.active:
-            state.active[key] = now
-            new_alerts.append(f"🔶 {desc} ref:{_gen_ref()}")
-
-    return new_alerts, resolved
-
-
 # --- Log rotation ---
 
 
@@ -322,62 +262,16 @@ def main() -> int:
         deliver_to_workers(cfg, f"✅ Bridge recovered ({', '.join(bridge_resolved)})")
         _append_log(log_path, f"{ts} RESOLVED: {', '.join(bridge_resolved)}")
 
-    # Check 3: health signals/threads/pools
-    if health.get("ok"):
-        # Everything is green — resolve any leftover active alerts
-        if state.active:
-            resolved_keys = list(state.active.keys())
-            state.active.clear()
-            deliver_to_workers(cfg, f"✅ Resolved: {', '.join(resolved_keys)}")
-            _append_log(log_path, f"{ts} RESOLVED: {', '.join(resolved_keys)}")
-
-        version = health.get("version", "?")
-        uptime = health.get("uptime_s", "?")
-        _append_log(log_path, f"{ts} OK pid={pid} v={version} uptime={uptime}s")
-        state.save(state_file)
-        rotate_log(log_path, max_lines=500)
-        rotate_bridge_log(cfg)
-        return 0
-
-    # Not fully OK — collect and reconcile
-    problems = collect_problems(cfg, health)
-
-    if not problems:
-        # All failures are snoozed — treat as OK from watchdog's perspective
-        version = health.get("version", "?")
-        _append_log(log_path, f"{ts} OK pid={pid} v={version} (all failures snoozed)")
-        # Still resolve any previously-active alerts that are now snoozed
-        if state.active:
-            resolved_keys = [k for k in state.active if k not in problems]
-            for k in resolved_keys:
-                del state.active[k]
-            if resolved_keys:
-                deliver_to_workers(cfg, f"✅ Resolved (snoozed): {', '.join(resolved_keys)}")
-        state.save(state_file)
-        rotate_log(log_path, max_lines=500)
-        rotate_bridge_log(cfg)
-        return 0
-
-    new_alerts, resolved = reconcile_alerts(state, problems, now)
-
-    # Deliver resolved notifications
-    if resolved:
-        deliver_to_workers(cfg, f"✅ Resolved: {', '.join(resolved)}")
-        _append_log(log_path, f"{ts} RESOLVED: {', '.join(resolved)}")
-
-    # Deliver new alerts only (no repeats for known failures)
-    if new_alerts:
-        deliver_to_workers(cfg, "\n".join(new_alerts))
-        _append_log(log_path, f"{ts} ALERT: {'; '.join(new_alerts)}")
-
-    if not new_alerts and not resolved:
-        # No state change — silent heartbeat
-        _append_log(log_path, f"{ts} WATCH pid={pid} active={list(state.active.keys())}")
-
+    # Bridge is alive and responding — health signal evaluation is handled
+    # exclusively by the internal alert system (bridge.py _health_alert_check)
+    version = health.get("version", "?")
+    uptime = health.get("uptime_s", "?")
+    ok = health.get("ok", False)
+    _append_log(log_path, f"{ts} OK pid={pid} v={version} uptime={uptime}s health={'green' if ok else 'degraded'}")
     state.save(state_file)
     rotate_log(log_path, max_lines=500)
     rotate_bridge_log(cfg)
-    return 1 if problems else 0
+    return 0
 
 
 if __name__ == "__main__":

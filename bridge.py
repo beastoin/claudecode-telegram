@@ -3110,7 +3110,12 @@ def _check_adapter_log(name: str, tail_lines: int = 20) -> str:
 
 # --- Unified alert delivery ---
 def _emit_alert(
-    text: str, *, tag: str = "alert", edit_msg_id: int | None = None, relay: bool = True
+    text: str,
+    *,
+    tag: str = "alert",
+    edit_msg_id: int | None = None,
+    relay: bool = True,
+    signal: str = "",
 ) -> TelegramApiResponseDict | None:
     """Single delivery sink for all alerts: Telegram admin + optionally relay channel.
 
@@ -3118,6 +3123,7 @@ def _emit_alert(
     JSONL hooks) flows through here. Cooldown/escalation stays in the caller —
     this only handles delivery fan-out.
 
+    signal: the alert signal key (e.g. "gmail", "poll") for routing to the right workers.
     relay=False skips worker relay — use for worker-lifecycle alerts that only
     the manager needs (worker state, JSONL staleness).
     """
@@ -3132,7 +3138,7 @@ def _emit_alert(
                 result = transport.send_text(admin_chat_id, text)
     if relay:
         with _log_suppress(Exception, tag=tag, msg=f"{tag} worker relay failed: "):
-            _send_health_alert(text)
+            _send_health_alert(text, signal=signal)
     return result
 
 
@@ -10671,6 +10677,74 @@ health = BridgeHealth()
 # Workers receive alerts via the relay delivery path and can poll /relay/<id>
 # for alert history. The channel never expires (TTL = 10 years).
 ALERT_WORKERS: list[str] = [w.strip() for w in os.environ.get("BRIDGE_ALERT_WORKERS", "").split(",") if w.strip()]
+
+# --- Alert routing ---
+_ALERT_ROUTING_FILE = Path.home() / ".config/claudecode-telegram/alert-routing.json"
+
+
+class AlertRouter:
+    """Pattern-matching routing table for alerts.
+
+    Routes alerts to different workers based on signal name.
+    Config file format: {"routes": [{"match": "gmail", "targets": ["geni", "lee"]}, ...]}
+    Patterns: exact match or prefix wildcard ("thread:*" matches "thread:anything").
+    Special target "$worker" expands to the worker_name parameter.
+    """
+
+    def __init__(
+        self,
+        routes: list[dict[str, object]] | None = None,
+        fallback_workers: list[str] | None = None,
+    ) -> None:
+        self.routes: list[dict[str, object]] = routes or []
+        self.fallback: list[str] = fallback_workers or []
+
+    @staticmethod
+    def load(path: Path | None = None, fallback_workers: list[str] | None = None) -> AlertRouter:
+        path = path or _ALERT_ROUTING_FILE
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text())
+                return AlertRouter(
+                    routes=data.get("routes", []),
+                    fallback_workers=fallback_workers,
+                )
+            except (json.JSONDecodeError, OSError):
+                pass
+        return AlertRouter(fallback_workers=fallback_workers)
+
+    def route(self, signal: str, worker_name: str = "") -> list[str]:
+        """Return deduplicated list of workers to deliver this alert to."""
+        for r in self.routes:
+            pattern = r.get("match", "")
+            if self._matches(str(pattern), signal):
+                targets: list[str] = []
+                for t in r.get("targets", []):
+                    if t == "$worker":
+                        if worker_name:
+                            targets.append(worker_name)
+                    else:
+                        targets.append(str(t))
+                seen: set[str] = set()
+                deduped: list[str] = []
+                for t in targets:
+                    if t not in seen:
+                        seen.add(t)
+                        deduped.append(t)
+                return deduped
+        return list(self.fallback)
+
+    @staticmethod
+    def _matches(pattern: str, signal: str) -> bool:
+        if pattern == "*":
+            return True
+        if pattern.endswith("*"):
+            return signal.startswith(pattern[:-1])
+        return pattern == signal
+
+
+alert_router: AlertRouter = AlertRouter.load(fallback_workers=ALERT_WORKERS)
+
 _ALERT_COOLDOWN = 300  # seconds between repeated alerts for same signal
 _ALERT_ESCALATE = 1800  # 30min: escalate if unresolved (shorter cooldown, severity bump)
 _ALERT_SNOOZE = 3600  # 1hr: /alert snooze duration
@@ -10819,11 +10893,11 @@ def _health_alert_check() -> None:
         _alert_log_append("resolve", key, duration_s=duration_s)
         _alerts_active_save()
         ref_tag = f" ref:{orig_ref}" if orig_ref else ""
-        _send_health_alert(f"✅ Resolved: {key}{ref_tag}")
+        _send_health_alert(f"✅ Resolved: {key}{ref_tag}", signal=key)
     # --- Active problems: classify severity, apply cooldown/snooze ---
     if not current_problems:
         return
-    to_send: list[str] = []
+    to_send: list[tuple[str, str]] = []  # (signal_key, formatted_message)
     active_changed = False
     for key, desc in current_problems.items():
         with _alert_lock:
@@ -10863,11 +10937,12 @@ def _health_alert_check() -> None:
                 ref = _alert_refs.get(key, "")
         duration = _fmt_duration(now - first_seen)
         ref_tag = f" ref:{ref}" if ref else ""
-        to_send.append(f"{severity} {desc} ({duration}){ref_tag}")
+        to_send.append((key, f"{severity} {desc} ({duration}){ref_tag}"))
     if active_changed:
         _alerts_active_save()
-    if to_send:
-        _emit_alert("\n".join(to_send), tag="health")
+    # Send per-signal so each alert routes to the correct workers
+    for sig_key, msg in to_send:
+        _emit_alert(msg, tag="health", signal=sig_key)
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -10923,23 +10998,27 @@ def _alert_status() -> str:
     return "Active alerts:\n" + "\n".join(lines)
 
 
-def _send_health_alert(text: str) -> None:
-    """Post alert to the bridge-health relay channel.
-    Workers subscribed to the channel receive it via relay delivery.
-    Also delivers directly to worker tmux sessions for immediate visibility."""
+def _send_health_alert(text: str, *, signal: str = "") -> None:
+    """Post alert to the bridge-health relay channel and deliver to routed workers.
+
+    Uses AlertRouter to determine recipients based on signal name.
+    Falls back to ALERT_WORKERS when signal is empty or router has no match."""
     if not _health_channel_id:
         return
+    targets = alert_router.route(signal) if signal else ALERT_WORKERS
+    if not targets:
+        targets = ALERT_WORKERS
     # Post to relay channel (persists in message history, visible via /relay/<id>)
     with _log_suppress(Exception, tag="health-alert", msg="relay append failed: "):
         _relay_append_msg(
             relay_store.channels[_health_channel_id],
             "system",
             "bridge-health",
-            ",".join(ALERT_WORKERS),
+            ",".join(targets),
             text,
         )
-    # Also deliver to worker sessions directly for immediate prompt
-    for worker in ALERT_WORKERS:
+    # Deliver to routed worker sessions directly for immediate prompt
+    for worker in targets:
         with _log_suppress(Exception, tag="health-alert", msg=f"tmux delivery to {worker} failed: "):
             if worker_manager is not None:
                 worker_manager.send(worker, f"bridge-health: {text}")

@@ -1,5 +1,17 @@
 ## Changelog
 
+### v0.52.16 - Alert system consolidation with routing
+
+Consolidate overlapping internal/external alert systems into one mechanism with domain-based routing.
+
+**Alert routing** — `AlertRouter` class with pattern-matching routing table loaded from `~/.config/claudecode-telegram/alert-routing.json`. Routes alerts to different workers based on signal name (e.g. `gmail` → geni, `github` → geni, everything else → lee). Supports exact match, prefix wildcards (`thread:*`), `$worker` variable expansion, and deduplication.
+
+**Internal system is the sole alert engine** — `_health_alert_check()` now passes signal keys through `_emit_alert()` → `_send_health_alert()` → routing table. Each signal routes independently, so gmail alerts go to geni while bridge alerts go to lee. Resolved alerts also route to the correct workers.
+
+**External watchdog simplified to liveness-only** — `bridge-watchdog.py` stripped of `collect_problems()` and `reconcile_alerts()` — only checks bridge process alive + HTTP responding. Health signal evaluation (gmail, github, threads, pools) is handled exclusively by the internal system. Eliminates duplicate alerts (previously both systems fired separate alerts for the same gmail issue).
+
+**19 new tests** covering routing config loading, pattern matching, wildcard/fallback/variable expansion, routed delivery, external watchdog simplification.
+
 ### v0.52.15 - Message delivery retry with failure alerting
 
 Remove the 👀 Telegram reaction on every message (was annoying, didn't confirm delivery). Replace with reliable delivery:

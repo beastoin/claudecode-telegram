@@ -1,4 +1,5 @@
 """Tests migrated from test.sh — health/watchdog category."""
+
 import pytest
 
 import bridge
@@ -16,6 +17,7 @@ def _bridge_env(monkeypatch, tmp_path):
     monkeypatch.setenv("BRIDGE_SESSIONS_DIR", str(sessions))
     monkeypatch.setenv("TEAM_DIR", str(tmp_path / "team"))
     import bridge
+
     saved = {
         "SESSIONS_DIR": bridge.SESSIONS_DIR,
         "WORKER_REGISTRY_FILE": bridge.WORKER_REGISTRY_FILE,
@@ -40,7 +42,7 @@ def test_watchdog_suppressed_after_restart():
 
     def fake_api(method, data):
         calls.append((method, data))
-        return {'ok': True}
+        return {"ok": True}
 
     orig_api = bridge.telegram_api
     bridge.telegram_api = fake_api
@@ -49,20 +51,20 @@ def test_watchdog_suppressed_after_restart():
     # Clear state
     with bridge.watchdog.lock:
         bridge.watchdog.prev_worker_states.clear()
-        bridge.watchdog.prev_worker_states['bob'] = 'STUCK'
+        bridge.watchdog.prev_worker_states["bob"] = "STUCK"
 
     # Mark bob as recently restarted
-    bridge.watchdog.recent_restarts['bob'] = time.time()
+    bridge.watchdog.recent_restarts["bob"] = time.time()
 
     # Resolved alert should be suppressed
-    bridge._send_resolved_alert('bob', 'READY')
-    assert len(calls) == 0, f'Expected 0 calls (suppressed), got {len(calls)}'
+    bridge._send_resolved_alert("bob", "READY")
+    assert len(calls) == 0, f"Expected 0 calls (suppressed), got {len(calls)}"
 
     # After 30s, should fire again
-    bridge.watchdog.recent_restarts['bob'] = time.time() - 31
+    bridge.watchdog.recent_restarts["bob"] = time.time() - 31
     calls.clear()
-    bridge._send_resolved_alert('bob', 'READY')
-    assert len(calls) == 1, f'Expected 1 call after cooldown, got {len(calls)}'
+    bridge._send_resolved_alert("bob", "READY")
+    assert len(calls) == 1, f"Expected 1 call after cooldown, got {len(calls)}"
 
     bridge.telegram_api = orig_api
     bridge.admin_chat_id = None
@@ -75,23 +77,25 @@ def test_watchdog_waiting_input_state():
 
     # Test _format_watchdog_status_pure with WAITING_INPUT
     now = time.time()
-    bridge.watchdog.worker_states['testbot'] = ('WAITING_INPUT', 'question=Pick color', now - 120)
+    bridge.watchdog.worker_states["testbot"] = ("WAITING_INPUT", "question=Pick color", now - 120)
     snapshot = dict(bridge.watchdog.worker_states)
-    result = bridge._format_watchdog_status_pure('testbot', pending_lookup=bridge.is_pending, state_snapshot=snapshot, clock_now=now)
-    assert 'Needs reply' in result, f'Expected Needs reply, got: {result}'
-    assert '2m' in result, f'Expected 2m duration, got: {result}'
+    result = bridge._format_watchdog_status_pure(
+        "testbot", pending_lookup=bridge.is_pending, state_snapshot=snapshot, clock_now=now
+    )
+    assert "Needs reply" in result, f"Expected Needs reply, got: {result}"
+    assert "2m" in result, f"Expected 2m duration, got: {result}"
 
     # Test that WAITING_INPUT is in bad_states for alert transitions
-    bad = {'OFFLINE', 'DEAD', 'STUCK', 'POISONED', 'EXITED', 'WAITING_INPUT'}
-    assert 'WAITING_INPUT' in bad
+    bad = {"OFFLINE", "DEAD", "STUCK", "POISONED", "EXITED", "WAITING_INPUT"}
+    assert "WAITING_INPUT" in bad
 
     # Test _team_attention_summary picks it up
-    icon, label, rank = bridge._team_attention_summary('Needs reply (2m)', 'Waiting for input: Pick color')
-    assert icon == '\U0001f7e1', f'Expected yellow icon, got: {icon}'
-    assert 'reply' in label, f'Expected reply label, got: {label}'
+    icon, label, rank = bridge._team_attention_summary("Needs reply (2m)", "Waiting for input: Pick color")
+    assert icon == "\U0001f7e1", f"Expected yellow icon, got: {icon}"
+    assert "reply" in label, f"Expected reply label, got: {label}"
 
     # Clean up
-    bridge.watchdog.worker_states.pop('testbot', None)
+    bridge.watchdog.worker_states.pop("testbot", None)
 
 
 def test_watchdog_resolved_alert():
@@ -102,7 +106,7 @@ def test_watchdog_resolved_alert():
 
     def fake_api(method, data):
         calls.append((method, data))
-        return {'ok': True}
+        return {"ok": True}
 
     orig_api = bridge.telegram_api
     bridge.telegram_api = fake_api
@@ -114,22 +118,22 @@ def test_watchdog_resolved_alert():
 
     # Simulate STUCK -> READY transition
     with bridge.watchdog.lock:
-        bridge.watchdog.prev_worker_states['testworker'] = 'STUCK'
+        bridge.watchdog.prev_worker_states["testworker"] = "STUCK"
 
-    bridge._send_resolved_alert('testworker', 'READY')
+    bridge._send_resolved_alert("testworker", "READY")
 
-    assert len(calls) == 1, f'Expected 1 API call, got {len(calls)}'
+    assert len(calls) == 1, f"Expected 1 API call, got {len(calls)}"
     method, data = calls[0]
-    assert method == 'sendMessage', f'Expected sendMessage, got {method}'
-    assert 'testworker' in data['text'], f'Expected worker name in text, got {data["text"]}'
-    assert 'back to normal' in data['text'], f'Expected back to normal in text, got {data["text"]}'
+    assert method == "sendMessage", f"Expected sendMessage, got {method}"
+    assert "testworker" in data["text"], f'Expected worker name in text, got {data["text"]}'
+    assert "back to normal" in data["text"], f'Expected back to normal in text, got {data["text"]}'
 
     # Verify no alert when transition is not from bad to good state
     calls.clear()
     with bridge.watchdog.lock:
-        bridge.watchdog.prev_worker_states['testworker'] = 'READY'
-    bridge._send_resolved_alert('testworker', 'BUSY_TOOL')
-    assert len(calls) == 0, f'Expected no call for READY->BUSY_TOOL, got {len(calls)}'
+        bridge.watchdog.prev_worker_states["testworker"] = "READY"
+    bridge._send_resolved_alert("testworker", "BUSY_TOOL")
+    assert len(calls) == 0, f"Expected no call for READY->BUSY_TOOL, got {len(calls)}"
 
     bridge.telegram_api = orig_api
     bridge.admin_chat_id = None
@@ -144,15 +148,15 @@ def test_format_watchdog_status():
 
     # Build a state snapshot for each state
     states = {
-        'ready_worker': ('READY', 'idle', since),
-        'busy_tool_worker': ('BUSY_TOOL', 'children=3', since),
-        'busy_thinking_worker': ('BUSY_THINKING', 'cpu=20.0', since),
-        'waiting_worker': ('WAITING', 'age=100s', since),
-        'stuck_worker': ('STUCK', 'age=600s cpu=2.0', since),
-        'dead_worker': ('DEAD', 'claude missing 60s', since),
-        'offline_worker': ('OFFLINE', 'tmux missing', since),
-        'poisoned_worker': ('POISONED', 'exec loop', since),
-        'untracked_worker': ('UNTRACKED_BUSY', 'children=1', since),
+        "ready_worker": ("READY", "idle", since),
+        "busy_tool_worker": ("BUSY_TOOL", "children=3", since),
+        "busy_thinking_worker": ("BUSY_THINKING", "cpu=20.0", since),
+        "waiting_worker": ("WAITING", "age=100s", since),
+        "stuck_worker": ("STUCK", "age=600s cpu=2.0", since),
+        "dead_worker": ("DEAD", "claude missing 60s", since),
+        "offline_worker": ("OFFLINE", "tmux missing", since),
+        "poisoned_worker": ("POISONED", "exec loop", since),
+        "untracked_worker": ("UNTRACKED_BUSY", "children=1", since),
     }
 
     # Inject into _worker_states
@@ -162,43 +166,63 @@ def test_format_watchdog_status():
     snapshot = dict(states)
 
     # READY -> 'Ready'
-    result = bridge._format_watchdog_status_pure('ready_worker', pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now)
-    assert result == 'Ready', f'READY: expected Ready, got {result}'
+    result = bridge._format_watchdog_status_pure(
+        "ready_worker", pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now
+    )
+    assert result == "Ready", f"READY: expected Ready, got {result}"
 
     # BUSY_TOOL -> 'Working'
-    result = bridge._format_watchdog_status_pure('busy_tool_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
-    assert result == 'Working', f'BUSY_TOOL: expected Working, got {result}'
+    result = bridge._format_watchdog_status_pure(
+        "busy_tool_worker", pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now
+    )
+    assert result == "Working", f"BUSY_TOOL: expected Working, got {result}"
 
     # BUSY_THINKING -> 'Thinking'
-    result = bridge._format_watchdog_status_pure('busy_thinking_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
-    assert result == 'Thinking', f'BUSY_THINKING: expected Thinking, got {result}'
+    result = bridge._format_watchdog_status_pure(
+        "busy_thinking_worker", pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now
+    )
+    assert result == "Thinking", f"BUSY_THINKING: expected Thinking, got {result}"
 
     # WAITING -> 'Working'
-    result = bridge._format_watchdog_status_pure('waiting_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
-    assert result == 'Working', f'WAITING: expected Working, got {result}'
+    result = bridge._format_watchdog_status_pure(
+        "waiting_worker", pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now
+    )
+    assert result == "Working", f"WAITING: expected Working, got {result}"
 
     # STUCK -> 'No progress (Xm)'
-    result = bridge._format_watchdog_status_pure('stuck_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
-    assert result.startswith('No progress'), f'STUCK: expected No progress (Xm), got {result}'
-    assert 'm)' in result, f'STUCK: expected minutes in parens, got {result}'
+    result = bridge._format_watchdog_status_pure(
+        "stuck_worker", pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now
+    )
+    assert result.startswith("No progress"), f"STUCK: expected No progress (Xm), got {result}"
+    assert "m)" in result, f"STUCK: expected minutes in parens, got {result}"
 
     # DEAD -> 'Not responding'
-    result = bridge._format_watchdog_status_pure('dead_worker', pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now)
-    assert result == 'Not responding', f'DEAD: expected Not responding, got {result}'
+    result = bridge._format_watchdog_status_pure(
+        "dead_worker", pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now
+    )
+    assert result == "Not responding", f"DEAD: expected Not responding, got {result}"
 
     # OFFLINE -> 'Offline'
-    result = bridge._format_watchdog_status_pure('offline_worker', pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now)
-    assert result == 'Offline', f'OFFLINE: expected Offline, got {result}'
+    result = bridge._format_watchdog_status_pure(
+        "offline_worker", pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now
+    )
+    assert result == "Offline", f"OFFLINE: expected Offline, got {result}"
 
     # POISONED -> 'Error loop (Xm)'
-    result = bridge._format_watchdog_status_pure('poisoned_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
-    assert result.startswith('Error loop'), f'POISONED: expected Error loop (Xm), got {result}'
+    result = bridge._format_watchdog_status_pure(
+        "poisoned_worker", pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now
+    )
+    assert result.startswith("Error loop"), f"POISONED: expected Error loop (Xm), got {result}"
 
     # Unknown worker -> fallback based on pending
-    result = bridge._format_watchdog_status_pure('nonexistent_worker', pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now)
-    assert result == 'Working', f'Unknown+pending: expected Working, got {result}'
-    result = bridge._format_watchdog_status_pure('nonexistent_worker', pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now)
-    assert result == 'Ready', f'Unknown+idle: expected Ready, got {result}'
+    result = bridge._format_watchdog_status_pure(
+        "nonexistent_worker", pending_lookup=lambda n: True, state_snapshot=snapshot, clock_now=now
+    )
+    assert result == "Working", f"Unknown+pending: expected Working, got {result}"
+    result = bridge._format_watchdog_status_pure(
+        "nonexistent_worker", pending_lookup=lambda n: False, state_snapshot=snapshot, clock_now=now
+    )
+    assert result == "Ready", f"Unknown+idle: expected Ready, got {result}"
 
     # Clean up
     with bridge.watchdog.lock:
@@ -235,31 +259,31 @@ def test_handle_watchdog_transition():
     now = time.time()
 
     # Local worker: STUCK triggers alert immediately
-    bridge._handle_watchdog_transition('worker1', 'STUCK', 'age=600s', now, now=now)
-    assert len(alerts) == 1, f'Expected 1 alert, got {len(alerts)}'
-    assert alerts[0] == ('worker1', 'STUCK', 'age=600s')
+    bridge._handle_watchdog_transition("worker1", "STUCK", "age=600s", now, now=now)
+    assert len(alerts) == 1, f"Expected 1 alert, got {len(alerts)}"
+    assert alerts[0] == ("worker1", "STUCK", "age=600s")
 
     # Transition from STUCK to READY requires 3 consecutive good probes
     alerts.clear()
-    bridge._handle_watchdog_transition('worker1', 'READY', 'idle', now, now=now)
-    assert len(resolved) == 0, f'Expected 0 resolved after 1 good probe, got {len(resolved)}'
-    bridge._handle_watchdog_transition('worker1', 'READY', 'idle', now, now=now)
-    assert len(resolved) == 0, f'Expected 0 resolved after 2 good probes, got {len(resolved)}'
-    bridge._handle_watchdog_transition('worker1', 'READY', 'idle', now, now=now)
-    assert len(resolved) == 1, f'Expected 1 resolved after 3 good probes, got {len(resolved)}'
-    assert resolved[0] == ('worker1', 'READY')
-    assert len(alerts) == 0, 'No alert for good state'
+    bridge._handle_watchdog_transition("worker1", "READY", "idle", now, now=now)
+    assert len(resolved) == 0, f"Expected 0 resolved after 1 good probe, got {len(resolved)}"
+    bridge._handle_watchdog_transition("worker1", "READY", "idle", now, now=now)
+    assert len(resolved) == 0, f"Expected 0 resolved after 2 good probes, got {len(resolved)}"
+    bridge._handle_watchdog_transition("worker1", "READY", "idle", now, now=now)
+    assert len(resolved) == 1, f"Expected 1 resolved after 3 good probes, got {len(resolved)}"
+    assert resolved[0] == ("worker1", "READY")
+    assert len(alerts) == 0, "No alert for good state"
 
     # Transition READY -> BUSY_THINKING should not trigger alert or resolved
     alerts.clear()
     resolved.clear()
-    bridge._handle_watchdog_transition('worker1', 'BUSY_THINKING', 'cpu=20', now, now=now)
-    assert len(alerts) == 0 and len(resolved) == 0, 'READY->BUSY_THINKING should fire nothing'
+    bridge._handle_watchdog_transition("worker1", "BUSY_THINKING", "cpu=20", now, now=now)
+    assert len(alerts) == 0 and len(resolved) == 0, "READY->BUSY_THINKING should fire nothing"
 
     # --- Remote worker: OFFLINE/DEAD requires 3 consecutive bad probes ---
     alerts.clear()
     resolved.clear()
-    bridge.get_worker_host = lambda name: 'remote-host'  # remote workers
+    bridge.get_worker_host = lambda name: "remote-host"  # remote workers
     with bridge.watchdog.lock:
         bridge.watchdog.prev_worker_states.clear()
         bridge.watchdog.consecutive_good_probes.clear()
@@ -268,33 +292,33 @@ def test_handle_watchdog_transition():
     since_past = now - 60  # past START_GRACE so eligible_for_alert is True
 
     # First bad probe: suppressed
-    bridge._handle_watchdog_transition('remote1', 'DEAD', 'claude missing 30s', since_past, now=now)
-    assert len(alerts) == 0, f'Remote: expected 0 alerts after 1 bad probe, got {len(alerts)}'
+    bridge._handle_watchdog_transition("remote1", "DEAD", "claude missing 30s", since_past, now=now)
+    assert len(alerts) == 0, f"Remote: expected 0 alerts after 1 bad probe, got {len(alerts)}"
 
     # Second bad probe: still suppressed
-    bridge._handle_watchdog_transition('remote1', 'DEAD', 'claude missing 30s', since_past, now=now)
-    assert len(alerts) == 0, f'Remote: expected 0 alerts after 2 bad probes, got {len(alerts)}'
+    bridge._handle_watchdog_transition("remote1", "DEAD", "claude missing 30s", since_past, now=now)
+    assert len(alerts) == 0, f"Remote: expected 0 alerts after 2 bad probes, got {len(alerts)}"
 
     # Third bad probe: alert fires
-    bridge._handle_watchdog_transition('remote1', 'DEAD', 'claude missing 30s', since_past, now=now)
-    assert len(alerts) == 1, f'Remote: expected 1 alert after 3 bad probes, got {len(alerts)}'
+    bridge._handle_watchdog_transition("remote1", "DEAD", "claude missing 30s", since_past, now=now)
+    assert len(alerts) == 1, f"Remote: expected 1 alert after 3 bad probes, got {len(alerts)}"
 
     # Good probe resets bad counter — but needs 3 good probes to resolve
     alerts.clear()
-    bridge._handle_watchdog_transition('remote1', 'READY', 'idle', now, now=now)
-    assert len(resolved) == 0, f'Remote: expected 0 resolved after 1 good probe, got {len(resolved)}'
-    bridge._handle_watchdog_transition('remote1', 'READY', 'idle', now, now=now)
-    bridge._handle_watchdog_transition('remote1', 'READY', 'idle', now, now=now)
-    assert len(resolved) == 1, f'Remote: expected 1 resolved after 3 good probes, got {len(resolved)}'
+    bridge._handle_watchdog_transition("remote1", "READY", "idle", now, now=now)
+    assert len(resolved) == 0, f"Remote: expected 0 resolved after 1 good probe, got {len(resolved)}"
+    bridge._handle_watchdog_transition("remote1", "READY", "idle", now, now=now)
+    bridge._handle_watchdog_transition("remote1", "READY", "idle", now, now=now)
+    assert len(resolved) == 1, f"Remote: expected 1 resolved after 3 good probes, got {len(resolved)}"
 
     # After resolve, single bad probe should not alert (absorbed)
     alerts.clear()
     resolved.clear()
-    bridge._handle_watchdog_transition('remote1', 'DEAD', 'claude missing 10s', since_past, now=now)
-    assert len(alerts) == 0, f'Remote: single bad probe after resolve should be absorbed, got {len(alerts)}'
+    bridge._handle_watchdog_transition("remote1", "DEAD", "claude missing 10s", since_past, now=now)
+    assert len(alerts) == 0, f"Remote: single bad probe after resolve should be absorbed, got {len(alerts)}"
     # Good probe resets — no resolved since prev_state is still READY
-    bridge._handle_watchdog_transition('remote1', 'READY', 'idle', now, now=now)
-    assert len(alerts) == 0 and len(resolved) == 0, 'Remote: transient blip absorbed cleanly'
+    bridge._handle_watchdog_transition("remote1", "READY", "idle", now, now=now)
+    assert len(alerts) == 0 and len(resolved) == 0, "Remote: transient blip absorbed cleanly"
 
     bridge._send_watchdog_alert = orig_alert
     bridge._send_resolved_alert = orig_resolved
@@ -309,7 +333,7 @@ def test_stale_pending_survives_for_watchdog():
     from bridge import is_pending, get_pending_file, _pending_timestamp, compute_state
     import time
 
-    test_name = 'stale_test'
+    test_name = "stale_test"
     pending_file = get_pending_file(test_name)
     pending_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -322,14 +346,14 @@ def test_stale_pending_survives_for_watchdog():
 
     # But _pending_timestamp still returns the timestamp
     ts = _pending_timestamp(test_name)
-    assert ts == stale_ts, f'timestamp lost: {ts}'
+    assert ts == stale_ts, f"timestamp lost: {ts}"
 
     # And compute_state should see STALE_PENDING
     now = time.time()
     pending_age = now - stale_ts
     state, reason = compute_state(
         tmux_exists=True,
-        claude_pid='12345',
+        claude_pid="12345",
         pending=True,  # watchdog uses _pending_timestamp, not is_pending()
         pending_ts=stale_ts,
         pending_age=pending_age,
@@ -341,7 +365,7 @@ def test_stale_pending_survives_for_watchdog():
         now=now,
     )
     # STALE_PENDING threshold triggers STUCK state (not a separate state name)
-    assert state == 'STUCK', f'expected STUCK at stale pending, got {state}: {reason}'
+    assert state == "STUCK", f"expected STUCK at stale pending, got {state}: {reason}"
 
     # Cleanup
     pending_file.unlink(missing_ok=True)
@@ -354,24 +378,24 @@ def test_watchdog_alert_on_stuck():
 
     bridge.admin_chat_id = 123
     bridge.watchdog.last_alert_ts = {}
-    bridge.watchdog.prev_worker_states = {'alice': 'READY'}
-    bridge.watchdog.worker_states = {'alice': ('STUCK', 'age=400s cpu=0.0', 600)}
+    bridge.watchdog.prev_worker_states = {"alice": "READY"}
+    bridge.watchdog.worker_states = {"alice": ("STUCK", "age=400s cpu=0.0", 600)}
 
     sent = {}
 
     def fake_api(method, data):
-        sent['method'] = method
-        sent['data'] = data
-        return {'ok': True}
+        sent["method"] = method
+        sent["data"] = data
+        return {"ok": True}
 
-    with patch('bridge.telegram_api', fake_api):
-        bridge._handle_watchdog_transition('alice', 'STUCK', 'age=400s cpu=0.0', since=600, now=1000)
+    with patch("bridge.telegram_api", fake_api):
+        bridge._handle_watchdog_transition("alice", "STUCK", "age=400s cpu=0.0", since=600, now=1000)
 
-    assert sent.get('method') == 'sendMessage', 'telegram_api not called'
-    assert sent['data']['chat_id'] == 123, 'admin chat id should be used'
-    txt = sent['data']['text']
-    assert 'alice' in txt, f'alert should include worker name: {txt}'
-    assert 'frozen' in txt or '/restart' in txt, f'alert should be human-friendly: {txt}'
+    assert sent.get("method") == "sendMessage", "telegram_api not called"
+    assert sent["data"]["chat_id"] == 123, "admin chat id should be used"
+    txt = sent["data"]["text"]
+    assert "alice" in txt, f"alert should include worker name: {txt}"
+    assert "frozen" in txt or "/restart" in txt, f"alert should be human-friendly: {txt}"
 
 
 def test_get_machines_includes_workers_and_health():
@@ -382,14 +406,28 @@ def test_get_machines_includes_workers_and_health():
     import bridge
 
     tmp = Path(tempfile.mkdtemp())
-    path = tmp / 'machines.json'
-    path.write_text(json.dumps({
-        'version': 1,
-        'machines': {
-            'vps': {'ssh_target': None, 'bridge_base_url': 'http://localhost:8271', 'home_root': '/home/claude', 'os_family': 'linux'},
-            'macmini': {'ssh_target': 'beastoin-agents-f1-mac-mini', 'bridge_base_url': 'http://100.125.36.102:8271', 'home_root': '/Users/beastoinagents', 'os_family': 'darwin'}
-        }
-    }))
+    path = tmp / "machines.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "machines": {
+                    "vps": {
+                        "ssh_target": None,
+                        "bridge_base_url": "http://localhost:8271",
+                        "home_root": "/home/claude",
+                        "os_family": "linux",
+                    },
+                    "macmini": {
+                        "ssh_target": "beastoin-agents-f1-mac-mini",
+                        "bridge_base_url": "http://100.125.36.102:8271",
+                        "home_root": "/Users/beastoinagents",
+                        "os_family": "darwin",
+                    },
+                },
+            }
+        )
+    )
     old_path = bridge.MACHINES_CONFIG_FILE
     old_cache = bridge.remote_cache.machines
     old_cache_path = bridge.remote_cache.machines_path
@@ -398,28 +436,28 @@ def test_get_machines_includes_workers_and_health():
     bridge.remote_cache.machines = None
     bridge.remote_cache.machines_path = None
     bridge.get_registered_sessions = lambda registered=None: {
-        'mon': {'tmux': 'claude-test-mon', 'backend': 'claude'},
-        'kai': {'tmux': 'claude-test-kai', 'backend': 'claude', 'host': 'beastoin-agents-f1-mac-mini'}
+        "mon": {"tmux": "claude-test-mon", "backend": "claude"},
+        "kai": {"tmux": "claude-test-kai", "backend": "claude", "host": "beastoin-agents-f1-mac-mini"},
     }
-    bridge.host_health.down['beastoin-agents-f1-mac-mini'] = True
-    bridge.host_health.down_since['beastoin-agents-f1-mac-mini'] = 123.0
-    bridge.host_health.last_error['beastoin-agents-f1-mac-mini'] = 'timeout'
+    bridge.host_health.down["beastoin-agents-f1-mac-mini"] = True
+    bridge.host_health.down_since["beastoin-agents-f1-mac-mini"] = 123.0
+    bridge.host_health.last_error["beastoin-agents-f1-mac-mini"] = "timeout"
 
     data = bridge.get_machines()
-    machines = {m['id']: m for m in data['machines']}
-    assert machines['vps']['worker_count'] == 1, machines
-    assert machines['macmini']['worker_count'] == 1, machines
-    assert machines['macmini']['workers'][0]['name'] == 'kai'
-    assert machines['macmini']['health']['status'] == 'down'
-    assert machines['macmini']['health']['last_error'] == 'timeout'
+    machines = {m["id"]: m for m in data["machines"]}
+    assert machines["vps"]["worker_count"] == 1, machines
+    assert machines["macmini"]["worker_count"] == 1, machines
+    assert machines["macmini"]["workers"][0]["name"] == "kai"
+    assert machines["macmini"]["health"]["status"] == "down"
+    assert machines["macmini"]["health"]["last_error"] == "timeout"
 
     bridge.MACHINES_CONFIG_FILE = old_path
     bridge.remote_cache.machines = old_cache
     bridge.remote_cache.machines_path = old_cache_path
     bridge.get_registered_sessions = old_get
-    bridge.host_health.down.pop('beastoin-agents-f1-mac-mini', None)
-    bridge.host_health.down_since.pop('beastoin-agents-f1-mac-mini', None)
-    bridge.host_health.last_error.pop('beastoin-agents-f1-mac-mini', None)
+    bridge.host_health.down.pop("beastoin-agents-f1-mac-mini", None)
+    bridge.host_health.down_since.pop("beastoin-agents-f1-mac-mini", None)
+    bridge.host_health.last_error.pop("beastoin-agents-f1-mac-mini", None)
     shutil.rmtree(tmp)
 
 
@@ -432,30 +470,29 @@ def test_phase2_watchdog_capture_pane_passes_host():
     import bridge
 
     tmpdir = tempfile.mkdtemp()
-    node_dir = Path(tmpdir) / 'node'
+    node_dir = Path(tmpdir) / "node"
     node_dir.mkdir()
 
-    reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
-    (node_dir / 'workers.json').write_text(json.dumps(reg))
+    reg = {"workers": {"ren": {"host": "mac-mini", "home_host": "localhost", "home_cwd": "/home/claude"}}}
+    (node_dir / "workers.json").write_text(json.dumps(reg))
 
     orig_node_dir = bridge.NODE_DIR
     orig_registry = bridge.WORKER_REGISTRY_FILE
     bridge.NODE_DIR = node_dir
-    bridge.WORKER_REGISTRY_FILE = node_dir / 'workers.json'
+    bridge.WORKER_REGISTRY_FILE = node_dir / "workers.json"
 
     cpt_calls = []
 
     def mock_cpt(tmux_name, lines=50, host=None):
-        cpt_calls.append({'tmux': tmux_name, 'host': host})
-        return ''
+        cpt_calls.append({"tmux": tmux_name, "host": host})
+        return ""
 
     # Test that _detect_poisoned passes host
-    with patch('bridge._capture_pane_text', side_effect=mock_cpt), \
-         patch('bridge._check_adapter_log', return_value=''):
-        bridge._detect_poisoned('ren', 'claude-prod-ren')
+    with patch("bridge._capture_pane_text", side_effect=mock_cpt), patch("bridge._check_adapter_log", return_value=""):
+        bridge._detect_poisoned("ren", "claude-prod-ren")
 
-    assert len(cpt_calls) == 1, f'Expected 1 _capture_pane_text call, got {cpt_calls}'
-    assert cpt_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {cpt_calls[0]["host"]}'
+    assert len(cpt_calls) == 1, f"Expected 1 _capture_pane_text call, got {cpt_calls}"
+    assert cpt_calls[0]["host"] == "mac-mini", f'Expected host=mac-mini, got {cpt_calls[0]["host"]}'
 
     bridge.NODE_DIR = orig_node_dir
     bridge.WORKER_REGISTRY_FILE = orig_registry
@@ -468,23 +505,23 @@ def test_watchdog_alert_stuck_copy():
 
     bridge.admin_chat_id = 123
     bridge.watchdog.last_alert_ts = {}
-    bridge.watchdog.prev_worker_states = {'alice': 'READY'}
+    bridge.watchdog.prev_worker_states = {"alice": "READY"}
 
     sent = {}
 
     def fake_api(method, data):
-        sent['method'] = method
-        sent['data'] = data
-        return {'ok': True}
+        sent["method"] = method
+        sent["data"] = data
+        return {"ok": True}
 
-    with patch('bridge.telegram_api', fake_api):
-        bridge._handle_watchdog_transition('alice', 'STUCK', 'age=900s cpu=0.0', since=100, now=1000)
+    with patch("bridge.telegram_api", fake_api):
+        bridge._handle_watchdog_transition("alice", "STUCK", "age=900s cpu=0.0", since=100, now=1000)
 
-    txt = sent['data']['text']
-    assert 'no progress' in txt.lower(), f'Should say no progress: {txt}'
-    assert '/restart --clean alice' in txt, f'Should have restart command: {txt}'
-    assert 'starts fresh' in txt.lower(), f'Should explain --clean: {txt}'
-    assert 'STUCK' not in txt, f'Should not expose internal state name: {txt}'
+    txt = sent["data"]["text"]
+    assert "no progress" in txt.lower(), f"Should say no progress: {txt}"
+    assert "/restart --clean alice" in txt, f"Should have restart command: {txt}"
+    assert "starts fresh" in txt.lower(), f"Should explain --clean: {txt}"
+    assert "STUCK" not in txt, f"Should not expose internal state name: {txt}"
 
 
 def test_watchdog_alert_poisoned_copy():
@@ -493,21 +530,21 @@ def test_watchdog_alert_poisoned_copy():
 
     bridge.admin_chat_id = 123
     bridge.watchdog.last_alert_ts = {}
-    bridge.watchdog.prev_worker_states = {'bob': 'READY'}
+    bridge.watchdog.prev_worker_states = {"bob": "READY"}
 
     sent = {}
 
     def fake_api(method, data):
-        sent['data'] = data
-        return {'ok': True}
+        sent["data"] = data
+        return {"ok": True}
 
-    with patch('bridge.telegram_api', fake_api):
-        bridge._handle_watchdog_transition('bob', 'POISONED', 'error loop', since=100, now=1000)
+    with patch("bridge.telegram_api", fake_api):
+        bridge._handle_watchdog_transition("bob", "POISONED", "error loop", since=100, now=1000)
 
-    txt = sent['data']['text']
-    assert 'error' in txt.lower(), f'Should mention error: {txt}'
-    assert 'POISONED' not in txt, f'Should not expose internal state POISONED: {txt}'
-    assert '/restart --clean bob' in txt, f'Should have restart command: {txt}'
+    txt = sent["data"]["text"]
+    assert "error" in txt.lower(), f"Should mention error: {txt}"
+    assert "POISONED" not in txt, f"Should not expose internal state POISONED: {txt}"
+    assert "/restart --clean bob" in txt, f"Should have restart command: {txt}"
 
 
 def test_watchdog_alert_dead_copy():
@@ -516,21 +553,21 @@ def test_watchdog_alert_dead_copy():
 
     bridge.admin_chat_id = 123
     bridge.watchdog.last_alert_ts = {}
-    bridge.watchdog.prev_worker_states = {'carol': 'READY'}
+    bridge.watchdog.prev_worker_states = {"carol": "READY"}
 
     sent = {}
 
     def fake_api(method, data):
-        sent['data'] = data
-        return {'ok': True}
+        sent["data"] = data
+        return {"ok": True}
 
-    with patch('bridge.telegram_api', fake_api):
-        bridge._handle_watchdog_transition('carol', 'DEAD', 'process gone', since=100, now=1000)
+    with patch("bridge.telegram_api", fake_api):
+        bridge._handle_watchdog_transition("carol", "DEAD", "process gone", since=100, now=1000)
 
-    txt = sent['data']['text']
-    assert 'stopped' in txt.lower(), f'Should say stopped: {txt}'
-    assert 'process' not in txt.lower(), f'Should not say process: {txt}'
-    assert '/restart --clean carol' in txt, f'Should have restart command: {txt}'
+    txt = sent["data"]["text"]
+    assert "stopped" in txt.lower(), f"Should say stopped: {txt}"
+    assert "process" not in txt.lower(), f"Should not say process: {txt}"
+    assert "/restart --clean carol" in txt, f"Should have restart command: {txt}"
 
 
 def test_watchdog_alert_waiting_input_copy():
@@ -539,31 +576,31 @@ def test_watchdog_alert_waiting_input_copy():
 
     bridge.admin_chat_id = 123
     bridge.watchdog.last_alert_ts = {}
-    bridge.watchdog.prev_worker_states = {'dave': 'READY'}
+    bridge.watchdog.prev_worker_states = {"dave": "READY"}
     bridge.watchdog.waiting_input_details = {
-        'dave': {
-            'header': 'Auth method',
-            'options': [
-                {'num': 1, 'label': 'OAuth', 'selected': True},
-                {'num': 2, 'label': 'JWT', 'selected': False},
+        "dave": {
+            "header": "Auth method",
+            "options": [
+                {"num": 1, "label": "OAuth", "selected": True},
+                {"num": 2, "label": "JWT", "selected": False},
             ],
-            'selected_num': 1,
+            "selected_num": 1,
         }
     }
 
     sent = {}
 
     def fake_api(method, data):
-        sent['data'] = data
-        return {'ok': True}
+        sent["data"] = data
+        return {"ok": True}
 
-    with patch('bridge.telegram_api', fake_api):
-        bridge._handle_watchdog_transition('dave', 'WAITING_INPUT', 'question=Auth', since=100, now=1000)
+    with patch("bridge.telegram_api", fake_api):
+        bridge._handle_watchdog_transition("dave", "WAITING_INPUT", "question=Auth", since=100, now=1000)
 
-    txt = sent['data']['text']
-    assert 'needs your reply' in txt.lower() or 'reply' in txt.lower(), f'Should say needs reply: {txt}'
-    assert 'Auth method' in txt, f'Should include question header: {txt}'
-    assert 'waiting for your input' not in txt.lower(), f'Should not use old copy: {txt}'
+    txt = sent["data"]["text"]
+    assert "needs your reply" in txt.lower() or "reply" in txt.lower(), f"Should say needs reply: {txt}"
+    assert "Auth method" in txt, f"Should include question header: {txt}"
+    assert "waiting for your input" not in txt.lower(), f"Should not use old copy: {txt}"
 
 
 def test_watchdog_resolved_copy():
@@ -571,20 +608,20 @@ def test_watchdog_resolved_copy():
     from unittest.mock import patch
 
     bridge.admin_chat_id = 123
-    bridge.watchdog.prev_worker_states = {'eve': 'STUCK'}
+    bridge.watchdog.prev_worker_states = {"eve": "STUCK"}
     bridge.watchdog.recent_restarts = {}
 
     sent = {}
 
     def fake_api(method, data):
-        sent['data'] = data
-        return {'ok': True}
+        sent["data"] = data
+        return {"ok": True}
 
-    with patch('bridge.telegram_api', fake_api):
-        bridge._send_resolved_alert('eve', 'READY')
+    with patch("bridge.telegram_api", fake_api):
+        bridge._send_resolved_alert("eve", "READY")
 
-    txt = sent['data']['text']
-    assert 'back to normal' in txt.lower() or chr(0x2705) in txt, f'Should say back to normal: {txt}'
+    txt = sent["data"]["text"]
+    assert "back to normal" in txt.lower() or chr(0x2705) in txt, f"Should say back to normal: {txt}"
 
 
 def test_watchdog_skips_dead_alert_during_teleport():
@@ -596,56 +633,62 @@ def test_watchdog_skips_dead_alert_during_teleport():
     from unittest.mock import patch
 
     tmpdir = tempfile.mkdtemp()
-    sessions_dir = Path(tmpdir) / 'sessions'
+    sessions_dir = Path(tmpdir) / "sessions"
     sessions_dir.mkdir()
     orig_sessions_dir = bridge.SESSIONS_DIR
     bridge.SESSIONS_DIR = sessions_dir
 
-    worker_name = 'bob'
+    worker_name = "bob"
     worker_dir = sessions_dir / worker_name
     worker_dir.mkdir()
 
     # Write teleport_state file
-    (worker_dir / 'teleport_state').write_text(json.dumps({
-        'phase': 1, 'source_host': 'host1',
-        'target_host': 'host2', 'target_cwd': '/tmp',
-        'started_at': 1000,
-    }))
+    (worker_dir / "teleport_state").write_text(
+        json.dumps(
+            {
+                "phase": 1,
+                "source_host": "host1",
+                "target_host": "host2",
+                "target_cwd": "/tmp",
+                "started_at": 1000,
+            }
+        )
+    )
 
     bridge.admin_chat_id = 123
     bridge.watchdog.last_alert_ts = {}
-    bridge.watchdog.prev_worker_states = {'bob': 'READY'}
+    bridge.watchdog.prev_worker_states = {"bob": "READY"}
 
     sent = []
 
     def fake_api(method, data):
         sent.append(data)
-        return {'ok': True}
+        return {"ok": True}
 
     now = time.time()
-    with patch('bridge.telegram_api', fake_api):
+    with patch("bridge.telegram_api", fake_api):
         # DEAD during teleport: should NOT send alert
-        bridge._handle_watchdog_transition('bob', 'DEAD', 'process gone', since=100, now=now)
-    assert len(sent) == 0, f'Should suppress DEAD alert during teleport, but sent {len(sent)} messages'
+        bridge._handle_watchdog_transition("bob", "DEAD", "process gone", since=100, now=now)
+    assert len(sent) == 0, f"Should suppress DEAD alert during teleport, but sent {len(sent)} messages"
 
     # Verify state was still recorded
     with bridge.watchdog.lock:
-        assert bridge.watchdog.prev_worker_states.get('bob') == 'DEAD', 'State should still be tracked'
+        assert bridge.watchdog.prev_worker_states.get("bob") == "DEAD", "State should still be tracked"
 
     # OFFLINE during teleport: should also NOT send alert
     sent.clear()
-    bridge.watchdog.prev_worker_states = {'bob': 'READY'}
-    with patch('bridge.telegram_api', fake_api):
-        bridge._handle_watchdog_transition('bob', 'OFFLINE', 'not running', since=100, now=now)
-    assert len(sent) == 0, f'Should suppress OFFLINE alert during teleport, but sent {len(sent)} messages'
+    bridge.watchdog.prev_worker_states = {"bob": "READY"}
+    with patch("bridge.telegram_api", fake_api):
+        bridge._handle_watchdog_transition("bob", "OFFLINE", "not running", since=100, now=now)
+    assert len(sent) == 0, f"Should suppress OFFLINE alert during teleport, but sent {len(sent)} messages"
 
     # Remove teleport_state — now DEAD alert should fire
-    (worker_dir / 'teleport_state').unlink()
+    (worker_dir / "teleport_state").unlink()
     sent.clear()
-    bridge.watchdog.prev_worker_states = {'bob': 'READY'}
-    with patch('bridge.telegram_api', fake_api):
-        bridge._handle_watchdog_transition('bob', 'DEAD', 'process gone', since=100, now=now)
-    assert len(sent) == 1, f'Should send DEAD alert without teleport_state, but sent {len(sent)} messages'
+    bridge.watchdog.prev_worker_states = {"bob": "READY"}
+    with patch("bridge.telegram_api", fake_api):
+        bridge._handle_watchdog_transition("bob", "DEAD", "process gone", since=100, now=now)
+    assert len(sent) == 1, f"Should send DEAD alert without teleport_state, but sent {len(sent)} messages"
 
     bridge.SESSIONS_DIR = orig_sessions_dir
 
@@ -662,19 +705,22 @@ def test_watchdog_exited_state():
     now = time.time()
 
     # Record EXITED state
-    since = bridge._record_worker_state('deadworker', 'EXITED', 'session gone', now)
+    since = bridge._record_worker_state("deadworker", "EXITED", "session gone", now)
 
     # Verify it's tracked
-    entry = bridge.watchdog.worker_states.get('deadworker')
-    assert entry is not None, 'EXITED state should be recorded'
-    assert entry[0] == 'EXITED', f'state should be EXITED, got {entry[0]}'
+    entry = bridge.watchdog.worker_states.get("deadworker")
+    assert entry is not None, "EXITED state should be recorded"
+    assert entry[0] == "EXITED", f"state should be EXITED, got {entry[0]}"
 
     # Verify _format_watchdog_status_pure returns 'exited'
     import time as _time
+
     _now = _time.time()
     _snap = dict(bridge.watchdog.worker_states)
-    status = bridge._format_watchdog_status_pure('deadworker', pending_lookup=bridge.is_pending, state_snapshot=_snap, clock_now=_now)
-    assert status == 'Session ended', f'expected "Session ended", got "{status}"'
+    status = bridge._format_watchdog_status_pure(
+        "deadworker", pending_lookup=bridge.is_pending, state_snapshot=_snap, clock_now=_now
+    )
+    assert status == "Session ended", f'expected "Session ended", got "{status}"'
 
     # Verify EXITED is in the alert actions
     bridge.admin_chat_id = 12345
@@ -682,18 +728,18 @@ def test_watchdog_exited_state():
 
     def fake_api(method, data):
         calls.append((method, data))
-        return {'ok': True}
+        return {"ok": True}
 
     orig_api = bridge.telegram_api
     bridge.telegram_api = fake_api
 
     # Simulate transition: first transition should alert (after grace period)
     bridge.watchdog.prev_worker_states.clear()
-    bridge._handle_watchdog_transition('deadworker', 'EXITED', 'session gone', since=now - 60, now=now)
-    assert len(calls) == 1, f'expected 1 alert call, got {len(calls)}'
-    txt = calls[0][1]['text']
-    assert 'deadworker' in txt, f'alert should mention worker name: {txt}'
-    assert '/restart' in txt, f'alert should suggest /restart: {txt}'
+    bridge._handle_watchdog_transition("deadworker", "EXITED", "session gone", since=now - 60, now=now)
+    assert len(calls) == 1, f"expected 1 alert call, got {len(calls)}"
+    txt = calls[0][1]["text"]
+    assert "deadworker" in txt, f"alert should mention worker name: {txt}"
+    assert "/restart" in txt, f"alert should suggest /restart: {txt}"
 
     bridge.telegram_api = orig_api
     bridge.admin_chat_id = None
@@ -708,6 +754,7 @@ class TestCmdStatus:
     @pytest.fixture(autouse=True)
     def _import_bridge(self):
         import bridge as _b
+
         self.bridge = _b
 
     def _make_router(self):
@@ -716,8 +763,9 @@ class TestCmdStatus:
 
         class FakeLegacy:
             def send_message(self, chat_id, text, **kw):
-                sent.append({'chat_id': chat_id, 'text': text, **kw})
-                return {'ok': True, 'result': {'message_id': 1}}
+                sent.append({"chat_id": chat_id, "text": text, **kw})
+                return {"ok": True, "result": {"message_id": 1}}
+
             def set_reaction(self, *a, **kw):
                 pass
 
@@ -726,7 +774,7 @@ class TestCmdStatus:
 
     def test_cmd_status_no_workers(self, tmp_path):
         """cmd_status works with zero workers registered."""
-        self.bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
+        self.bridge.WORKER_REGISTRY_FILE = tmp_path / "workers.json"
         self.bridge.NODE_DIR = tmp_path
         self.bridge.worker_manager._sessions_cache = None
         orig_scan = self.bridge.worker_manager.scan_tmux_sessions
@@ -738,9 +786,9 @@ class TestCmdStatus:
 
             assert result is True
             assert len(sent) == 1
-            text = str(sent[0]['text'])
-            assert f'v{self.bridge.VERSION}' in text
-            assert '0' in text and 'workers' in text
+            text = str(sent[0]["text"])
+            assert f"v{self.bridge.VERSION}" in text
+            assert "0" in text and "workers" in text
         finally:
             self.bridge.worker_manager.scan_tmux_sessions = orig_scan
 
@@ -749,66 +797,66 @@ class TestCmdStatus:
         import json as _json
         from claudecode import WorkerStateEntry
 
-        self.bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
-        (tmp_path / 'workers.json').write_text(_json.dumps({
-            'workers': {
-                'alice': {'session': 'test-alice', 'backend': 'claude', 'host': None},
-            }
-        }))
+        self.bridge.WORKER_REGISTRY_FILE = tmp_path / "workers.json"
+        (tmp_path / "workers.json").write_text(
+            _json.dumps(
+                {
+                    "workers": {
+                        "alice": {"session": "test-alice", "backend": "claude", "host": None},
+                    }
+                }
+            )
+        )
         self.bridge.worker_manager._sessions_cache = None
 
         orig_online = self.bridge.worker_manager.is_online
         self.bridge.worker_manager.is_online = lambda name, session=None: True
 
-        self.bridge.watchdog.worker_states['alice'] = WorkerStateEntry(
-            status='BUSY', reason='working', since=1000.0
-        )
+        self.bridge.watchdog.worker_states["alice"] = WorkerStateEntry(status="BUSY", reason="working", since=1000.0)
 
         try:
             router, sent = self._make_router()
             result = router.cmd_status(chat_id=123)
 
             assert result is True
-            text = str(sent[0]['text'])
-            assert '1 busy' in text
-            assert 'alice' in text
+            text = str(sent[0]["text"])
+            assert "1 busy" in text
+            assert "alice" in text
         finally:
             self.bridge.worker_manager.is_online = orig_online
-            self.bridge.watchdog.worker_states.pop('alice', None)
+            self.bridge.watchdog.worker_states.pop("alice", None)
 
     def test_cmd_status_worker_state_uses_status_not_state(self):
         """WorkerStateEntry field is 'status', not 'state' — regression test."""
         from claudecode import WorkerStateEntry
 
-        entry = WorkerStateEntry(status='BUSY', reason='test', since=1.0)
-        assert entry.status == 'BUSY'
-        assert not hasattr(entry, 'state'), \
-            "WorkerStateEntry should not have a 'state' attribute — use 'status'"
+        entry = WorkerStateEntry(status="BUSY", reason="test", since=1.0)
+        assert entry.status == "BUSY"
+        assert not hasattr(entry, "state"), "WorkerStateEntry should not have a 'state' attribute — use 'status'"
 
     def test_cmd_status_no_emoji(self, tmp_path):
         """Status output should be clean — no emoji characters."""
         import re
 
-        self.bridge.WORKER_REGISTRY_FILE = tmp_path / 'workers.json'
+        self.bridge.WORKER_REGISTRY_FILE = tmp_path / "workers.json"
         self.bridge.worker_manager._sessions_cache = None
 
         router, sent = self._make_router()
         router.cmd_status(chat_id=123)
 
-        text = str(sent[0]['text'])
-        emoji_pattern = re.compile(
-            r'[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001FA00-\U0001FA6F]'
-        )
-        assert not emoji_pattern.search(text), \
-            f"/status output contains emoji: {text}"
+        text = str(sent[0]["text"])
+        emoji_pattern = re.compile(r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001FA00-\U0001FA6F]")
+        assert not emoji_pattern.search(text), f"/status output contains emoji: {text}"
 
 
 # --- JSONL alert log tests ---
+
 
 def test_alert_log_append_writes_jsonl(tmp_path):
     import json
     import bridge
     import shared
+
     orig_node = bridge.NODE_DIR
     orig_fh = shared._log_fh
     shared._log_fh = None
@@ -838,6 +886,7 @@ def test_alert_log_multiple_appends(tmp_path):
     import json
     import bridge
     import shared
+
     orig_node = bridge.NODE_DIR
     orig_fh = shared._log_fh
     shared._log_fh = None
@@ -863,6 +912,7 @@ def test_alerts_active_save_and_load(tmp_path):
     import json
     import time
     import bridge
+
     orig_node = bridge.NODE_DIR
     bridge.NODE_DIR = tmp_path
     now = time.time()
@@ -903,6 +953,7 @@ def test_health_alert_check_logs_fire_and_resolve(tmp_path):
     import bridge
     import shared
     from unittest.mock import patch
+
     orig_node = bridge.NODE_DIR
     orig_fh = shared._log_fh
     shared._log_fh = None
@@ -924,8 +975,7 @@ def test_health_alert_check_logs_fire_and_resolve(tmp_path):
             "threads": {},
             "pools": {},
         }
-        with patch.object(bridge.health, "snapshot", return_value=bad_snap), \
-             patch("bridge._send_health_alert"):
+        with patch.object(bridge.health, "snapshot", return_value=bad_snap), patch("bridge._send_health_alert"):
             bridge._health_alert_check()
         log_file = tmp_path / "bridge.log"
         assert log_file.exists()
@@ -936,8 +986,7 @@ def test_health_alert_check_logs_fire_and_resolve(tmp_path):
         assert alert_entries[0]["key"] == "gmail"
 
         good_snap = {"signals": {"gmail": {"ok": True, "last_ok_ago_s": 1, "errors": 0}}, "threads": {}, "pools": {}}
-        with patch.object(bridge.health, "snapshot", return_value=good_snap), \
-             patch("bridge._send_health_alert"):
+        with patch.object(bridge.health, "snapshot", return_value=good_snap), patch("bridge._send_health_alert"):
             bridge._health_alert_check()
         all_entries = [json.loads(l) for l in log_file.read_text().strip().split("\n")]
         resolve_events = [e for e in all_entries if e.get("category") == "alert" and e["event"] == "resolve"]
@@ -965,6 +1014,7 @@ def test_health_alert_check_logs_fire_and_resolve(tmp_path):
 class TestResourceAlertState:
     def test_initial_state(self):
         from claudecode import ResourceAlertState
+
         s = ResourceAlertState()
         assert not s.alerted
         assert s.first_alert_ts == 0.0
@@ -973,6 +1023,7 @@ class TestResourceAlertState:
 
     def test_fire_first_time(self):
         from claudecode import ResourceAlertState
+
         s = ResourceAlertState()
         s.fire(1000.0)
         assert s.alerted
@@ -982,6 +1033,7 @@ class TestResourceAlertState:
 
     def test_fire_subsequent_increments_count(self):
         from claudecode import ResourceAlertState
+
         s = ResourceAlertState()
         s.fire(1000.0)
         s.fire(1900.0)
@@ -993,6 +1045,7 @@ class TestResourceAlertState:
 
     def test_recover_resets_all(self):
         from claudecode import ResourceAlertState
+
         s = ResourceAlertState()
         s.fire(1000.0)
         s.fire(1900.0)
@@ -1004,6 +1057,7 @@ class TestResourceAlertState:
 
     def test_should_re_alert(self):
         from claudecode import ResourceAlertState
+
         s = ResourceAlertState()
         s.fire(1000.0)
         assert not s.should_re_alert(1000.0, 900)
@@ -1013,11 +1067,13 @@ class TestResourceAlertState:
 
     def test_should_re_alert_not_alerted(self):
         from claudecode import ResourceAlertState
+
         s = ResourceAlertState()
         assert not s.should_re_alert(5000.0, 900)
 
     def test_duration(self):
         from claudecode import ResourceAlertState
+
         s = ResourceAlertState()
         assert s.duration(5000.0) == 0.0
         s.fire(1000.0)
@@ -1030,10 +1086,13 @@ class TestResourceAlertState:
 class _FakeClock:
     def __init__(self, t: float = 0.0):
         self.t = t
+
     def time(self) -> float:
         return self.t
+
     def sleep(self, s: float) -> None:
         self.t += s
+
     def advance(self, s: float) -> None:
         self.t += s
 
@@ -1189,7 +1248,7 @@ class TestEmitAlert:
             with patch.object(bridge, "_send_health_alert") as mock_relay:
                 result = bridge._emit_alert("test alert", tag="test")
             mock_transport.send_text.assert_called_once_with("12345", "test alert")
-            mock_relay.assert_called_once_with("test alert")
+            mock_relay.assert_called_once_with("test alert", signal="")
             assert result == {"ok": True, "result": {"message_id": 42}}
         finally:
             bridge.transport = orig_transport
@@ -1208,7 +1267,7 @@ class TestEmitAlert:
                 bridge._emit_alert("resolved", tag="test", edit_msg_id=99)
             mock_transport.edit_message.assert_called_once_with("12345", 99, "resolved")
             mock_transport.send_text.assert_not_called()
-            mock_relay.assert_called_once_with("resolved")
+            mock_relay.assert_called_once_with("resolved", signal="")
         finally:
             bridge.transport = orig_transport
             bridge.admin_chat_id = orig_chat
@@ -1225,7 +1284,7 @@ class TestEmitAlert:
             with patch.object(bridge, "_send_health_alert") as mock_relay:
                 result = bridge._emit_alert("alert text", tag="test")
             mock_transport.send_text.assert_not_called()
-            mock_relay.assert_called_once_with("alert text")
+            mock_relay.assert_called_once_with("alert text", signal="")
             assert result is None
         finally:
             bridge.transport = orig_transport
@@ -1257,12 +1316,14 @@ class TestEmitAlert:
 
 # --- JSONL staleness detection tests ---
 
+
 class TestJsonlStalenessCheck:
 
     def _setup_busy_worker(self, name, busy_since, monkeypatch):
         """Set up a worker that appears BUSY in watchdog state."""
         import threading
-        if not hasattr(bridge, 'watchdog') or not hasattr(bridge.watchdog, 'lock'):
+
+        if not hasattr(bridge, "watchdog") or not hasattr(bridge.watchdog, "lock"):
             bridge.watchdog = threading.current_thread()
             bridge.watchdog.lock = threading.Lock()
             bridge.watchdog.worker_states = {}
@@ -1276,6 +1337,7 @@ class TestJsonlStalenessCheck:
     def test_jsonl_stale_alert_fires_for_busy_worker(self, monkeypatch, tmp_path):
         """Alert fires when BUSY worker's JSONL hasn't updated in >5 minutes."""
         from unittest.mock import patch, MagicMock
+
         self._cleanup_jsonl_state()
         now = 1000000.0
         busy_since = now - 400  # busy for 400s
@@ -1284,11 +1346,14 @@ class TestJsonlStalenessCheck:
         jsonl_file = tmp_path / "transcript.jsonl"
         jsonl_file.write_text("{}")
         import os
+
         os.utime(str(jsonl_file), (now - 600, now - 600))  # 10 min old
         monkeypatch.setattr(bridge, "_resolve_transcript_path", lambda name: (str(jsonl_file), "sid1", "/tmp"))
         monkeypatch.setattr(bridge._clock, "time", lambda: now)
-        with patch.object(bridge, "_emit_alert", return_value={"ok": True}) as mock_emit, \
-             patch.object(bridge, "_alert_log_append"):
+        with (
+            patch.object(bridge, "_emit_alert", return_value={"ok": True}) as mock_emit,
+            patch.object(bridge, "_alert_log_append"),
+        ):
             bridge._watchdog_jsonl_staleness_check({"testw": {}})
         assert mock_emit.called
         alert_text = mock_emit.call_args[0][0]
@@ -1300,9 +1365,11 @@ class TestJsonlStalenessCheck:
     def test_jsonl_stale_skips_ready_worker(self, monkeypatch, tmp_path):
         """No alert for READY (non-busy) workers even if JSONL is old."""
         from unittest.mock import patch
+
         self._cleanup_jsonl_state()
         import threading
-        if not hasattr(bridge, 'watchdog') or not hasattr(bridge.watchdog, 'lock'):
+
+        if not hasattr(bridge, "watchdog") or not hasattr(bridge.watchdog, "lock"):
             bridge.watchdog = threading.current_thread()
             bridge.watchdog.lock = threading.Lock()
             bridge.watchdog.worker_states = {}
@@ -1317,6 +1384,7 @@ class TestJsonlStalenessCheck:
     def test_jsonl_stale_skips_remote_worker(self, monkeypatch, tmp_path):
         """Remote workers are skipped (can't stat their JSONL locally)."""
         from unittest.mock import patch
+
         self._cleanup_jsonl_state()
         now = 1000000.0
         self._setup_busy_worker("remotew", now - 400, monkeypatch)
@@ -1330,6 +1398,7 @@ class TestJsonlStalenessCheck:
     def test_jsonl_stale_no_alert_when_fresh(self, monkeypatch, tmp_path):
         """No alert when JSONL was recently updated (even if worker is busy)."""
         from unittest.mock import patch
+
         self._cleanup_jsonl_state()
         now = 1000000.0
         self._setup_busy_worker("freshw", now - 400, monkeypatch)
@@ -1337,6 +1406,7 @@ class TestJsonlStalenessCheck:
         jsonl_file = tmp_path / "transcript.jsonl"
         jsonl_file.write_text("{}")
         import os
+
         os.utime(str(jsonl_file), (now - 30, now - 30))  # 30s old — fresh
         monkeypatch.setattr(bridge, "_resolve_transcript_path", lambda name: (str(jsonl_file), "sid1", "/tmp"))
         monkeypatch.setattr(bridge._clock, "time", lambda: now)
@@ -1348,6 +1418,7 @@ class TestJsonlStalenessCheck:
     def test_jsonl_stale_cooldown_prevents_spam(self, monkeypatch, tmp_path):
         """Second alert within cooldown window is suppressed."""
         from unittest.mock import patch
+
         self._cleanup_jsonl_state()
         now = 1000000.0
         self._setup_busy_worker("spamw", now - 400, monkeypatch)
@@ -1355,12 +1426,15 @@ class TestJsonlStalenessCheck:
         jsonl_file = tmp_path / "transcript.jsonl"
         jsonl_file.write_text("{}")
         import os
+
         os.utime(str(jsonl_file), (now - 600, now - 600))
         monkeypatch.setattr(bridge, "_resolve_transcript_path", lambda name: (str(jsonl_file), "sid1", "/tmp"))
         monkeypatch.setattr(bridge._clock, "time", lambda: now)
         # First alert fires
-        with patch.object(bridge, "_emit_alert", return_value={"ok": True}) as mock_emit, \
-             patch.object(bridge, "_alert_log_append"):
+        with (
+            patch.object(bridge, "_emit_alert", return_value={"ok": True}) as mock_emit,
+            patch.object(bridge, "_alert_log_append"),
+        ):
             bridge._watchdog_jsonl_staleness_check({"spamw": {}})
         assert mock_emit.called
         # Second call — should be suppressed (in _jsonl_stale_alerted set)
@@ -1372,6 +1446,7 @@ class TestJsonlStalenessCheck:
     def test_jsonl_stale_clears_on_fresh_update(self, monkeypatch, tmp_path):
         """Alert state clears when JSONL becomes fresh again."""
         from unittest.mock import patch
+
         self._cleanup_jsonl_state()
         now = 1000000.0
         self._setup_busy_worker("clearw", now - 400, monkeypatch)
@@ -1379,18 +1454,20 @@ class TestJsonlStalenessCheck:
         jsonl_file = tmp_path / "transcript.jsonl"
         jsonl_file.write_text("{}")
         import os
+
         os.utime(str(jsonl_file), (now - 600, now - 600))
         monkeypatch.setattr(bridge, "_resolve_transcript_path", lambda name: (str(jsonl_file), "sid1", "/tmp"))
         monkeypatch.setattr(bridge._clock, "time", lambda: now)
         # Fire initial alert
-        with patch.object(bridge, "_emit_alert", return_value={"ok": True}), \
-             patch.object(bridge, "_alert_log_append", return_value="abc123def456"):
+        with (
+            patch.object(bridge, "_emit_alert", return_value={"ok": True}),
+            patch.object(bridge, "_alert_log_append", return_value="abc123def456"),
+        ):
             bridge._watchdog_jsonl_staleness_check({"clearw": {}})
         assert "clearw" in bridge._jsonl_stale_alerted
         # Now JSONL becomes fresh — should send resolve
         os.utime(str(jsonl_file), (now - 10, now - 10))
-        with patch.object(bridge, "_emit_alert") as mock_emit, \
-             patch.object(bridge, "_alert_log_append") as mock_log:
+        with patch.object(bridge, "_emit_alert") as mock_emit, patch.object(bridge, "_alert_log_append") as mock_log:
             bridge._watchdog_jsonl_staleness_check({"clearw": {}})
         assert "clearw" not in bridge._jsonl_stale_alerted
         mock_emit.assert_called_once()
@@ -1404,11 +1481,14 @@ class TestWatchdogHostDownSkip:
 
     def _setup(self, monkeypatch, tmp_path):
         from unittest.mock import MagicMock
+
         node_dir = tmp_path / "node"
         node_dir.mkdir()
-        reg = {"workers": {
-            "rem": {"host": "mac-test", "home_host": "localhost", "home_cwd": "/tmp"},
-        }}
+        reg = {
+            "workers": {
+                "rem": {"host": "mac-test", "home_host": "localhost", "home_cwd": "/tmp"},
+            }
+        }
         (node_dir / "workers.json").write_text(__import__("json").dumps(reg))
         monkeypatch.setattr(bridge, "NODE_DIR", node_dir)
         monkeypatch.setattr(bridge, "WORKER_REGISTRY_FILE", node_dir / "workers.json")
@@ -1417,6 +1497,7 @@ class TestWatchdogHostDownSkip:
     def test_downed_host_skipped_no_ssh(self, monkeypatch, tmp_path):
         """When a host is marked DOWN, _watchdog_probe_remote_hosts skips SSH."""
         from unittest.mock import patch, MagicMock
+
         self._setup(monkeypatch, tmp_path)
 
         bridge.host_health.down["mac-test"] = True
@@ -1425,9 +1506,11 @@ class TestWatchdogHostDownSkip:
 
         ssh_calls = []
         orig_remote_run = bridge._remote_run
+
         def mock_remote_run(*args, **kwargs):
             ssh_calls.append(args)
             return MagicMock(returncode=0, stdout="")
+
         monkeypatch.setattr(bridge, "_remote_run", mock_remote_run)
 
         registered = {"rem": {"tmux": "claude-test-rem", "backend": "claude", "host": "mac-test"}}
@@ -1442,6 +1525,7 @@ class TestWatchdogHostDownSkip:
     def test_reprobe_after_interval(self, monkeypatch, tmp_path):
         """After HOST_REPROBE_INTERVAL, a downed host is re-probed."""
         from unittest.mock import MagicMock, patch
+
         self._setup(monkeypatch, tmp_path)
 
         bridge.host_health.down["mac-test"] = True
@@ -1450,9 +1534,11 @@ class TestWatchdogHostDownSkip:
         monkeypatch.setattr(bridge._clock, "time", lambda: 100.0 + bridge.HOST_REPROBE_INTERVAL + 1)
 
         ssh_calls = []
+
         def mock_remote_run(*args, **kwargs):
             ssh_calls.append(args)
             return MagicMock(returncode=0, stdout="claude-test-rem 12345")
+
         monkeypatch.setattr(bridge, "_remote_run", mock_remote_run)
 
         registered = {"rem": {"tmux": "claude-test-rem", "backend": "claude", "host": "mac-test"}}
@@ -1470,6 +1556,7 @@ class TestWatchdogHostDownSkip:
         """When re-probe fails, host stays in failed_hosts."""
         from unittest.mock import MagicMock, patch
         import subprocess
+
         self._setup(monkeypatch, tmp_path)
 
         bridge.host_health.down["mac-test"] = True
@@ -1479,6 +1566,7 @@ class TestWatchdogHostDownSkip:
 
         def mock_remote_run(*args, **kwargs):
             raise subprocess.TimeoutExpired(cmd="ssh", timeout=5)
+
         monkeypatch.setattr(bridge, "_remote_run", mock_remote_run)
 
         registered = {"rem": {"tmux": "claude-test-rem", "backend": "claude", "host": "mac-test"}}
@@ -1495,6 +1583,7 @@ class TestWatchdogHostDownSkip:
     def test_collect_worker_pids_skips_downed_host(self, monkeypatch, tmp_path):
         """_watchdog_collect_worker_pids doesn't call _get_claude_pid for workers on downed hosts."""
         from unittest.mock import patch
+
         self._setup(monkeypatch, tmp_path)
 
         registered = {"rem": {"tmux": "claude-test-rem", "backend": "claude", "host": "mac-test"}}
@@ -1503,14 +1592,14 @@ class TestWatchdogHostDownSkip:
         now = 200.0
 
         pid_calls = []
+
         def mock_get_claude_pid(pane_pid, host=None):
             pid_calls.append(host)
             return "999"
+
         monkeypatch.setattr(bridge, "_get_claude_pid", mock_get_claude_pid)
 
-        cpids, tmux_present, _bi = bridge._watchdog_collect_worker_pids(
-            registered, pane_pids, remote_pane_pids, now
-        )
+        cpids, tmux_present, _bi = bridge._watchdog_collect_worker_pids(registered, pane_pids, remote_pane_pids, now)
 
         assert not tmux_present.get("rem", False), "Worker on downed host should have no tmux"
         assert len(pid_calls) == 0, "Should not call _get_claude_pid for downed host worker"
@@ -1518,12 +1607,15 @@ class TestWatchdogHostDownSkip:
     def test_gather_cpu_stats_skips_downed_host(self, monkeypatch, tmp_path):
         """_watchdog_gather_cpu_stats doesn't call _ps_stats for hosts with no claude_pids."""
         from unittest.mock import patch
+
         self._setup(monkeypatch, tmp_path)
 
         stats_calls = []
+
         def mock_ps_stats(pids, host=None):
             stats_calls.append(host)
             return {}
+
         monkeypatch.setattr(bridge, "_ps_stats", mock_ps_stats)
 
         # Empty claude_pids = no workers on downed host have pids
@@ -1629,6 +1721,7 @@ class TestWatchdogHealthSignalTiming:
 
 # ── Alert gap fixes (v0.52.11) ──────────────────────────────────────
 
+
 class TestResourceAlertRefIds:
     """GAP-1: Resource alerts (disk/mem/IO/worktree) get structured logging and ref IDs."""
 
@@ -1643,8 +1736,14 @@ class TestResourceAlertRefIds:
         self._orig_emit = bridge._emit_alert
         self._orig_log = bridge._alert_log_append
         self._orig_run = bridge._run_metric
-        bridge._emit_alert = lambda text, **kw: (self.emit_calls.append(text), {"ok": True, "result": {"message_id": 1}})[1]
-        bridge._alert_log_append = lambda event, key, **kw: (self.log_calls.append((event, key, kw)), f"{event[:4]}{key[:6]}00")[1]
+        bridge._emit_alert = lambda text, **kw: (
+            self.emit_calls.append(text),
+            {"ok": True, "result": {"message_id": 1}},
+        )[1]
+        bridge._alert_log_append = lambda event, key, **kw: (
+            self.log_calls.append((event, key, kw)),
+            f"{event[:4]}{key[:6]}00",
+        )[1]
         bridge.host_health.reset()
 
     def teardown_method(self):
@@ -1703,6 +1802,7 @@ class TestConnectorResolveLogged:
 
     def test_resolve_calls_alert_log_append(self):
         from unittest.mock import patch, MagicMock
+
         connector = MagicMock(spec=bridge.BaseConnector)
         connector._lock = __import__("threading").RLock()
         connector._alert_sent = True
@@ -1715,6 +1815,7 @@ class TestConnectorResolveLogged:
 
     def test_resolve_not_logged_when_no_alert(self):
         from unittest.mock import patch, MagicMock
+
         connector = MagicMock(spec=bridge.BaseConnector)
         connector._lock = __import__("threading").RLock()
         connector._alert_sent = False
@@ -1731,6 +1832,7 @@ class TestConnectorErrorDetail:
 
     def test_track_failure_includes_error(self):
         from unittest.mock import patch, MagicMock
+
         connector = MagicMock(spec=bridge.BaseConnector)
         connector._lock = __import__("threading").RLock()
         connector._consecutive_failures = 0
@@ -1750,6 +1852,7 @@ class TestHealthSignalReachesAdmin:
 
     def test_fire_uses_emit_alert(self):
         from unittest.mock import patch, MagicMock
+
         orig_alert_workers = bridge.ALERT_WORKERS
         orig_channel = bridge._health_channel_id
         bridge.ALERT_WORKERS = True
@@ -1760,10 +1863,12 @@ class TestHealthSignalReachesAdmin:
                 "threads": {},
                 "pools": {},
             }
-            with patch.object(bridge.health, "snapshot", return_value=fake_snap), \
-                 patch.object(bridge, "_emit_alert") as mock_emit, \
-                 patch.object(bridge, "_alert_log_append", return_value="test12345678"), \
-                 patch.object(bridge, "_alerts_active_save"):
+            with (
+                patch.object(bridge.health, "snapshot", return_value=fake_snap),
+                patch.object(bridge, "_emit_alert") as mock_emit,
+                patch.object(bridge, "_alert_log_append", return_value="test12345678"),
+                patch.object(bridge, "_alerts_active_save"),
+            ):
                 bridge._alert_active.clear()
                 bridge._alert_last_sent.clear()
                 bridge._alert_refs.clear()
@@ -1786,7 +1891,7 @@ class TestWorkerCycleNoRelay:
         relay_calls: list[str] = []
         orig_health_alert = bridge._send_health_alert
         orig_api = bridge.telegram_api
-        bridge._send_health_alert = lambda text: relay_calls.append(text)
+        bridge._send_health_alert = lambda text, **kw: relay_calls.append(text)
         bridge.telegram_api = lambda method, data: {"ok": True, "result": {"message_id": 1}}
         bridge.admin_chat_id = 12345
         with bridge.watchdog.lock:
@@ -1808,7 +1913,7 @@ class TestWorkerCycleNoRelay:
         relay_calls: list[str] = []
         orig_health_alert = bridge._send_health_alert
         orig_api = bridge.telegram_api
-        bridge._send_health_alert = lambda text: relay_calls.append(text)
+        bridge._send_health_alert = lambda text, **kw: relay_calls.append(text)
         bridge.telegram_api = lambda method, data: {"ok": True, "result": {"message_id": 1}}
         bridge.admin_chat_id = 12345
         with bridge.watchdog.lock:
@@ -1824,13 +1929,14 @@ class TestWorkerCycleNoRelay:
     def test_jsonl_stale_fire_no_relay(self):
         """JSONL staleness fire uses relay=False."""
         import os, time
+
         relay_calls: list[str] = []
         orig_health_alert = bridge._send_health_alert
         orig_api = bridge.telegram_api
         orig_resolve = bridge._resolve_transcript_path
         orig_get_host = bridge.get_worker_host
         orig_log_append = bridge._alert_log_append
-        bridge._send_health_alert = lambda text: relay_calls.append(text)
+        bridge._send_health_alert = lambda text, **kw: relay_calls.append(text)
         bridge.telegram_api = lambda method, data: {"ok": True, "result": {"message_id": 1}}
         bridge._alert_log_append = lambda *a, **kw: "abc123def456"
         bridge.admin_chat_id = 12345
@@ -1843,6 +1949,7 @@ class TestWorkerCycleNoRelay:
         bridge._jsonl_stale_refs.pop("staletest", None)
         # Create a stale JSONL file
         import tempfile
+
         tmpdir = tempfile.mkdtemp()
         fake_jsonl = os.path.join(tmpdir, "fake.jsonl")
         with open(fake_jsonl, "w") as f:
@@ -1869,6 +1976,7 @@ class TestWorkerCycleNoRelay:
             bridge._jsonl_stale_last_alert.pop("staletest", None)
             bridge._jsonl_stale_refs.pop("staletest", None)
             import shutil
+
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_resource_alert_still_relays(self):
@@ -1876,7 +1984,7 @@ class TestWorkerCycleNoRelay:
         relay_calls: list[str] = []
         orig_health_alert = bridge._send_health_alert
         orig_api = bridge.telegram_api
-        bridge._send_health_alert = lambda text: relay_calls.append(text)
+        bridge._send_health_alert = lambda text, **kw: relay_calls.append(text)
         bridge.telegram_api = lambda method, data: {"ok": True, "result": {"message_id": 1}}
         bridge.admin_chat_id = 12345
         try:
@@ -1893,6 +2001,7 @@ class TestCpuHogRefId:
 
     def test_cpu_hog_passes_key(self):
         from unittest.mock import patch
+
         watchdog_calls: list[dict] = []
         orig_watchdog_alert = bridge._watchdog_alert
 
@@ -1900,9 +2009,9 @@ class TestCpuHogRefId:
             watchdog_calls.append({"cat": cat, "text": txt, "key": key})
 
         bridge._watchdog_alert = capture_watchdog_alert
-        bridge._run_metric = lambda metric, host=None: [
-            {"pid": 1234, "cpu": 95.0, "etime_min": 120, "cmd": "stress"}
-        ] if metric == "cpu_hogs" else None
+        bridge._run_metric = lambda metric, host=None: (
+            [{"pid": 1234, "cpu": 95.0, "etime_min": 120, "cmd": "stress"}] if metric == "cpu_hogs" else None
+        )
         bridge.host_health.cpu_hog_alert_ts.clear()
         bridge.host_health.cpu_hogs.clear()
         try:
