@@ -1,5 +1,14 @@
 ## Changelog
 
+### v0.52.15 - Message delivery retry with failure alerting
+
+Remove the 👀 Telegram reaction on every message (was annoying, didn't confirm delivery). Replace with reliable delivery:
+
+- **Retry with backoff** — `WorkerManager.send()` retries up to 3 attempts (1s, 3s backoff) for interactive backends (Claude). Skips retry immediately if tmux session is dead. Non-interactive backends (Codex, callback) are unaffected.
+- **Delivery logging** — each attempt logged with worker name and attempt number for traceability.
+- **Failure alerting** — existing `health.error("dispatch")` fires after all retries exhausted, visible in `/alerts`. Manager gets explicit error message in Telegram.
+- **High performance** — retries block only the sending pool thread, not other deliveries. Different workers' sends remain fully parallel via `_message_pool`.
+
 ### v0.52.14 - Agent-friendly bridge API
 
 All 36 HTTP endpoints now have rich schemas, self-description, categorization by consumer tier, and structured error guidance. Workers can discover every available endpoint and diagnose their own setup without reading docs.

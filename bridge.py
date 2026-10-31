@@ -5812,6 +5812,9 @@ class WorkerManager:
                 return True
         return backend.is_online(tmux_name)
 
+    _SEND_MAX_ATTEMPTS = 3
+    _SEND_BACKOFF = (1.0, 3.0)
+
     def send(
         self, name: str, message: str, chat_id: ChatId | None = None, session: TmuxSessionDict | None = None
     ) -> bool:
@@ -5827,7 +5830,29 @@ class WorkerManager:
         backend_name = normalize_backend(session.get("backend"))
         backend = claudecode.get_backend(backend_name)
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
-        return backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
+        ok = backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
+        if ok or not backend.is_interactive:
+            return ok
+        host = get_worker_host(name)
+        for attempt in range(1, self._SEND_MAX_ATTEMPTS):
+            if not claudecode.tmux_exists(tmux_name, host=host, timeout=TIMEOUT_TMUX_CHECK):
+                _log(
+                    _LOG_WARN,
+                    "delivery",
+                    f"{name}: session dead, skipping retry (attempt {attempt + 1}/{self._SEND_MAX_ATTEMPTS})",
+                )
+                break
+            delay = self._SEND_BACKOFF[min(attempt - 1, len(self._SEND_BACKOFF) - 1)]
+            _log(
+                _LOG_INFO, "delivery", f"{name}: attempt {attempt + 1}/{self._SEND_MAX_ATTEMPTS} after {delay}s backoff"
+            )
+            time.sleep(delay)
+            ok = backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
+            if ok:
+                _log(_LOG_INFO, "delivery", f"{name}: delivered on attempt {attempt + 1}")
+                return True
+        _log(_LOG_WARN, "delivery", f"{name}: all {self._SEND_MAX_ATTEMPTS} attempts failed")
+        return False
 
     def _pipe_worker_entry(self, name: str, peer_host: str | None, caller_host: str | None) -> WorkerEndpointInfo:
         pipe_path = claudecode.ensure_worker_pipe(name)
@@ -9848,8 +9873,7 @@ class CommandRouter:
                 chat_id, f"Could not send to {session_name.capitalize()}. Try /restart.", outcome="Needs decision"
             )
             return
-        if msg_id and send_ok and self.transport and chat_id is not None:
-            self.transport.set_reaction(chat_id, msg_id, [{"type": "emoji", "emoji": "👀"}])
+        return
 
 
 PostRouteHandler = Callable[["Handler", bytes, re.Match[str] | None], None]  # type: ignore[misc]
