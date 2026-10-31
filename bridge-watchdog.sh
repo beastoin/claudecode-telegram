@@ -224,9 +224,15 @@ auto_restart_bridge() {
 # Alerting
 # ---------------------------------------------------------------------------
 
+_gen_ref() {
+    head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-6
+}
+
 send_alert() {
     local msg="$1"
     local bridge_dead="${2:-false}"
+    local ref
+    ref=$(_gen_ref)
     # Check cooldown
     if [[ -f "$COOLDOWN_FILE" ]]; then
         local last_ts
@@ -237,8 +243,9 @@ send_alert() {
             return 0  # cooldown active
         fi
     fi
-    echo "$(date -Iseconds) ALERT: $msg" >> "$STATE_DIR/watchdog.log"
+    echo "$(date -Iseconds) ALERT: $msg ref:$ref" >> "$STATE_DIR/watchdog.log"
     date +%s > "$COOLDOWN_FILE"
+    local tagged_msg="$msg ref:$ref"
     # Primary: deliver to alert workers via tmux (worker-driven, no manager in loop)
     ALERT_WORKERS="${BRIDGE_ALERT_WORKERS:-}"
     if [[ -n "$ALERT_WORKERS" ]]; then
@@ -246,14 +253,14 @@ send_alert() {
         IFS=',' read -ra workers <<< "$ALERT_WORKERS"
         for w in "${workers[@]}"; do
             w=$(echo "$w" | xargs)  # trim whitespace
-            tmux send-keys -t "${tmux_prefix}${w}" "bridge-watchdog: $msg" Enter 2>/dev/null || true
+            tmux send-keys -t "${tmux_prefix}${w}" "bridge-watchdog: $tagged_msg" Enter 2>/dev/null || true
         done
     fi
     # Fallback: Telegram DM to manager ONLY if bridge is dead (last resort)
     if [[ "$bridge_dead" == "true" && -n "$BOT_TOKEN" && -n "$ADMIN_CHAT" ]]; then
         curl -s -m 10 "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -d "chat_id=$ADMIN_CHAT" \
-            -d "text=🚨 Bridge watchdog: $msg" \
+            -d "text=🚨 Bridge watchdog: $tagged_msg" \
             -d "parse_mode=" > /dev/null 2>&1 || true
     fi
 }

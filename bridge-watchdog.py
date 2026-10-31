@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,11 @@ from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+
+def _gen_ref() -> str:
+    return secrets.token_hex(3)
+
 
 # --- Config ---
 
@@ -220,7 +226,7 @@ def reconcile_alerts(
     for key, desc in current_problems.items():
         if key not in state.active:
             state.active[key] = now
-            new_alerts.append(f"🔶 {desc}")
+            new_alerts.append(f"🔶 {desc} ref:{_gen_ref()}")
 
     return new_alerts, resolved
 
@@ -284,12 +290,12 @@ def main() -> int:
 
     if pid is None:
         msg = f"Bridge process not running (node={cfg.node})"
-        # Bridge dead is a special state — always alert (can't snooze via bridge)
         if "bridge:dead" not in state.active:
+            ref = _gen_ref()
             state.active["bridge:dead"] = now
-            deliver_to_workers(cfg, f"🚨 {msg}")
-            telegram_send(cfg.bot_token, cfg.admin_chat, f"🚨 Bridge watchdog: {msg}")
-            _append_log(log_path, f"{ts} ALERT: {msg}")
+            deliver_to_workers(cfg, f"🚨 {msg} ref:{ref}")
+            telegram_send(cfg.bot_token, cfg.admin_chat, f"🚨 Bridge watchdog: {msg} ref:{ref}")
+            _append_log(log_path, f"{ts} ALERT: {msg} ref:{ref}")
         state.save(state_file)
         return 1
 
@@ -298,10 +304,11 @@ def main() -> int:
     if "error" in health:
         msg = f"Bridge HTTP not responding on port {cfg.port} (PID={pid})"
         if "bridge:http" not in state.active:
+            ref = _gen_ref()
             state.active["bridge:http"] = now
-            deliver_to_workers(cfg, f"🚨 {msg}")
-            telegram_send(cfg.bot_token, cfg.admin_chat, f"🚨 Bridge watchdog: {msg}")
-            _append_log(log_path, f"{ts} ALERT: {msg}")
+            deliver_to_workers(cfg, f"🚨 {msg} ref:{ref}")
+            telegram_send(cfg.bot_token, cfg.admin_chat, f"🚨 Bridge watchdog: {msg} ref:{ref}")
+            _append_log(log_path, f"{ts} ALERT: {msg} ref:{ref}")
         state.save(state_file)
         return 1
 
