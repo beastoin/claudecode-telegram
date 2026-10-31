@@ -371,3 +371,164 @@ def test_default_routing_config_path():
     path = bridge._ALERT_ROUTING_FILE
     assert "claudecode-telegram" in str(path)
     assert "alert-routing.json" in str(path)
+
+
+# ---------------------------------------------------------------------------
+# 6. Signal wiring — all _emit_alert call sites pass signal=
+# ---------------------------------------------------------------------------
+
+
+def test_connector_on_alert_passes_signal_tag():
+    """connector_on_alert handler passes signal=tag to _emit_alert."""
+    import bridge
+
+    calls = []
+
+    def capture_emit(text, *, tag="alert", edit_msg_id=None, relay=True, signal=""):
+        calls.append({"text": text, "tag": tag, "signal": signal})
+
+    handler = bridge.connector_on_alert("gmail")
+    with patch("bridge._emit_alert", side_effect=capture_emit):
+        handler("Gmail auth token expired")
+    assert len(calls) == 1
+    assert calls[0]["signal"] == "gmail"
+    assert calls[0]["tag"] == "gmail"
+
+
+def test_watchdog_alert_passes_signal_key():
+    """_watchdog_alert passes signal=key to _emit_alert."""
+    import bridge
+
+    calls = []
+
+    def capture_emit(text, *, tag="alert", edit_msg_id=None, relay=True, signal=""):
+        calls.append({"signal": signal, "tag": tag})
+
+    with (
+        patch("bridge._emit_alert", side_effect=capture_emit),
+        patch("bridge._alert_log_append", return_value="abc123"),
+    ):
+        bridge._watchdog_alert("host", "Mac Mini unreachable", key="host:macmini")
+    assert len(calls) == 1
+    assert calls[0]["signal"] == "host:macmini"
+    assert calls[0]["tag"] == "watchdog"
+
+
+def test_send_watchdog_alert_passes_worker_signal():
+    """_send_watchdog_alert passes signal=f'worker:{name}' to _emit_alert."""
+    import bridge
+
+    calls = []
+
+    def capture_emit(text, *, tag="alert", edit_msg_id=None, relay=True, signal=""):
+        calls.append({"signal": signal})
+
+    with (
+        patch.object(bridge, "admin_chat_id", "12345"),
+        patch.object(bridge, "transport", MagicMock()),
+        patch("bridge._emit_alert", side_effect=capture_emit),
+        patch("bridge._alert_log_append", return_value="abc123"),
+    ):
+        with bridge.watchdog.lock:
+            bridge.watchdog.last_alert_ts.pop("hal", None)
+        bridge._send_watchdog_alert("hal", "DEAD", "process exited")
+    assert len(calls) >= 1
+    assert calls[0]["signal"] == "worker:hal"
+
+
+def test_send_resolved_alert_passes_worker_signal():
+    """_send_resolved_alert passes signal=f'worker:{name}' to _emit_alert."""
+    import bridge
+
+    calls = []
+
+    def capture_emit(text, *, tag="alert", edit_msg_id=None, relay=True, signal=""):
+        calls.append({"signal": signal, "text": text})
+
+    with (
+        patch.object(bridge, "admin_chat_id", "12345"),
+        patch("bridge._emit_alert", side_effect=capture_emit),
+        patch("bridge._alert_log_append", return_value="abc123"),
+    ):
+        with bridge.watchdog.lock:
+            bridge.watchdog.last_resolved_ts.pop("hal", None)
+            bridge.watchdog.alert_msg_ids.pop("hal", None)
+            bridge.watchdog.prev_worker_states["hal"] = "DEAD"
+            bridge.watchdog.recent_restarts.pop("hal", None)
+        bridge._send_resolved_alert("hal", "READY")
+    assert len(calls) >= 1
+    assert calls[0]["signal"] == "worker:hal"
+    assert "back to normal" in calls[0]["text"]
+
+
+def test_no_emit_alert_without_signal():
+    """Every _emit_alert() invocation in bridge.py passes signal= explicitly."""
+    import re
+
+    src = Path("/home/claude/claudecode-telegram/bridge.py").read_text()
+    # Match call sites only — skip the function definition (which has "def _emit_alert(")
+    call_pattern = re.compile(r"(?<!def )_emit_alert\(")
+    emit_calls = list(call_pattern.finditer(src))
+    assert len(emit_calls) > 0, "Should find at least one _emit_alert call"
+    for m in emit_calls:
+        start = m.start()
+        depth = 0
+        i = m.end() - 1
+        while i < len(src):
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        call_text = src[start : i + 1]
+        assert "signal=" in call_text, f"_emit_alert call missing signal=: {call_text[:100]}"
+
+
+def test_worker_state_alerts_route_to_empty_targets():
+    """Worker state alerts (worker:*) route to empty target list — admin DM only."""
+    import bridge
+
+    config = {
+        "routes": [
+            {"match": "gmail", "targets": ["geni"]},
+            {"match": "worker:*", "targets": []},
+            {"match": "*", "targets": ["lee"]},
+        ]
+    }
+    config_file = Path("/tmp/test-routing-worker.json")
+    config_file.write_text(json.dumps(config))
+    router = bridge.AlertRouter.load(path=config_file)
+    assert router.route("worker:hal") == []
+    assert router.route("worker:mon") == []
+    assert router.route("gmail") == ["geni"]
+    assert router.route("host:macmini") == ["lee"]
+    config_file.unlink()
+
+
+def test_health_endpoint_passes_signal():
+    """POST /health alert endpoint passes signal=f'health:{worker}'."""
+    import bridge
+
+    calls = []
+
+    def capture_emit(text, *, tag="alert", edit_msg_id=None, relay=True, signal=""):
+        calls.append({"signal": signal, "tag": tag})
+
+    handler = MagicMock()
+    handler._send_json = MagicMock()
+    body = json.dumps({
+        "worker": "hal",
+        "issue": "jsonl_stale",
+        "age": 300,
+    }).encode()
+
+    with (
+        patch("bridge._emit_alert", side_effect=capture_emit),
+        patch("bridge._log_event", return_value="evt123"),
+        patch("bridge._log"),
+    ):
+        bridge.handle_health_alert(handler, body)
+    assert len(calls) == 1
+    assert calls[0]["signal"] == "health:hal"

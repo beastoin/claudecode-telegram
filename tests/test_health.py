@@ -1296,7 +1296,7 @@ class TestEmitAlert:
 
         with patch.object(bridge, "_emit_alert") as mock_emit:
             bridge._watchdog_alert("Disk", "disk full")
-        mock_emit.assert_called_once_with("disk full", tag="watchdog")
+        mock_emit.assert_called_once_with("disk full", tag="watchdog", signal="")
 
     def test_watchdog_alert_skips_none(self):
         from unittest.mock import patch
@@ -1311,7 +1311,7 @@ class TestEmitAlert:
         handler = bridge.connector_on_alert("github")
         with patch.object(bridge, "_emit_alert") as mock_emit:
             handler("GitHub poll failed")
-        mock_emit.assert_called_once_with("GitHub poll failed", tag="github")
+        mock_emit.assert_called_once_with("GitHub poll failed", tag="github", signal="github")
 
 
 # --- JSONL staleness detection tests ---

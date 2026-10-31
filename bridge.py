@@ -2154,7 +2154,7 @@ def connector_get_workers() -> set[str]:
 
 def connector_on_alert(tag: str) -> Callable:
     def handler(text: str) -> None:
-        _emit_alert(text, tag=tag)
+        _emit_alert(text, tag=tag, signal=tag)
 
     return handler
 
@@ -3150,7 +3150,7 @@ def _watchdog_alert(category: str, text: str | None, *, key: str = "") -> None:
     if key:
         eid = _alert_log_append("fire", key, desc=text.splitlines()[0])
         text += f"\nref:{eid[:6]}"
-    _emit_alert(text, tag="watchdog")
+    _emit_alert(text, tag="watchdog", signal=key)
 
 
 def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
@@ -3203,7 +3203,7 @@ def _send_watchdog_alert(name: str, state: str, reason: str) -> None:
     eid = _alert_log_append("fire", f"worker:{name}", state=state, reason=reason[:200], desc=text.splitlines()[0])
     ref = eid[:6]
     text += f"\nref:{ref}"
-    result = _emit_alert(text, tag="watchdog", relay=False)
+    result = _emit_alert(text, tag="watchdog", relay=False, signal=f"worker:{name}")
     if result and result.get("ok"):
         _log(_LOG_WARN, "watchdog", f"Alert sent for {name} ({state}): {text[:80]}")
         _res = result.get("result", {})
@@ -3286,11 +3286,11 @@ def _send_resolved_alert(name: str, new_state: str) -> None:
         old_msg_id, old_text, ref = alert_info
         ref_tag = f" ref:{ref}" if ref else ""
         resolved_text = f"✅ {name} resolved (was: {old_text.splitlines()[0]}){ref_tag}"
-        _emit_alert(resolved_text, tag="watchdog", edit_msg_id=old_msg_id, relay=False)
+        _emit_alert(resolved_text, tag="watchdog", edit_msg_id=old_msg_id, relay=False, signal=f"worker:{name}")
         _log(_LOG_WARN, "watchdog", f"Edited alert for {name} -> resolved{ref_tag}")
         return
     text = f"✅ {name} is back to normal."
-    _emit_alert(text, tag="watchdog", relay=False)
+    _emit_alert(text, tag="watchdog", relay=False, signal=f"worker:{name}")
 
 
 def _handle_watchdog_transition(
@@ -3398,6 +3398,7 @@ def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> N
                     f"✅ {name}: transcript recording resumed (worker no longer busy){ref_tag}",
                     tag="jsonl-stale",
                     relay=False,
+                    signal=f"jsonl:{name}",
                 )
             continue
         busy_duration = now - entry[2]
@@ -3420,7 +3421,12 @@ def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> N
                 _jsonl_stale_alerted.discard(name)
                 _alert_log_append("resolve", f"jsonl:{name}", ref=ref)
                 ref_tag = f"\nref:{ref}" if ref else ""
-                _emit_alert(f"✅ {name}: transcript recording resumed{ref_tag}", tag="jsonl-stale", relay=False)
+                _emit_alert(
+                    f"✅ {name}: transcript recording resumed{ref_tag}",
+                    tag="jsonl-stale",
+                    relay=False,
+                    signal=f"jsonl:{name}",
+                )
             continue
         last_alert = _jsonl_stale_last_alert.get(name, 0)
         if now - last_alert < _JSONL_STALE_ALERT_COOLDOWN:
@@ -3436,7 +3442,7 @@ def _watchdog_jsonl_staleness_check(registered: dict[str, TmuxSessionDict]) -> N
             "fire", f"jsonl:{name}", state="STALE", reason=f"age={int(age)}s busy={int(busy_duration)}s"
         )
         alert_text += f"\nref:{eid[:6]}"
-        result = _emit_alert(alert_text, tag="jsonl-stale", relay=False)
+        result = _emit_alert(alert_text, tag="jsonl-stale", relay=False, signal=f"jsonl:{name}")
         if result and result.get("ok"):
             _jsonl_stale_last_alert[name] = now
             _jsonl_stale_alerted.add(name)
@@ -7636,7 +7642,7 @@ def handle_health_alert(handler: Handler, body: bytes = b"") -> None:
         eid = _log_event("alert", "fire", key=f"health:{worker}", desc=f"{issue} age={age}s")
         alert_text = f"🔴 {worker}: JSONL transcript stale ({age_human}). Session active but not recording. `/restart {worker}` to fix.\nref:{eid[:6]}"
         _log(_LOG_WARN, "health", f"Health alert: {worker} — {issue} (age={age}s)")
-        _emit_alert(alert_text, tag="health")
+        _emit_alert(alert_text, tag="health", signal=f"health:{worker}")
         handler._send_json(200, {"ok": True})
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         _log(_LOG_ERROR, "bridge", f"Health alert error: {e}")
