@@ -8603,20 +8603,16 @@ bridge.WORKER_REGISTRY_FILE = Path(tmpdir) / 'workers.json'
 bridge._registry_add('lee', 'claude', 123)
 
 # Update with teleport info
-bridge._registry_update_teleport('lee', host='mac', home_host='vps', home_cwd='/home/claude/proj')
+bridge._registry_update_host('lee', host='mac')
 data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
 w = data['workers']['lee']
 assert w['host'] == 'mac', f'host should be mac, got {w.get(\"host\")}'
-assert w.get('home_host') == 'vps', f'home_host should be vps, got {w.get(\"home_host\")}'
-assert w['home_cwd'] == '/home/claude/proj', f'home_cwd wrong'
 
-# Clear teleport info (teleback)
-bridge._registry_clear_teleport('lee')
+# Clear teleport info (teleport back)
+bridge._registry_update_host('lee', host=None)
 data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
 w = data['workers']['lee']
 assert w.get('host') is None, f'host should be cleared'
-assert w.get('home_host') is None, f'home_host should be cleared'
-assert w.get('home_cwd') is None, f'home_cwd should be cleared'
 
 bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
@@ -10031,8 +10027,7 @@ bridge.worker_manager.scan_tmux_sessions = lambda: {
 
 # Register ren as teleported to mac mini
 bridge._registry_add('ren', 'claude', 123)
-bridge._registry_update_teleport('ren', host='beastoin-agents-f1-mac-mini',
-                                  home_host=None, home_cwd='/home/claude/omi')
+bridge._registry_update_host('ren', host='beastoin-agents-f1-mac-mini')
 
 workers = bridge.worker_manager.get_workers()
 ren = next((w for w in workers if w['name'] == 'ren'), None)
@@ -10077,8 +10072,7 @@ bridge.worker_manager.scan_tmux_sessions = lambda: {
 bridge._registry_add('kai', 'claude', 1)
 bridge._registry_add('mon', 'claude', 2)
 # kai lives on mac-mini, mon lives on bridge host (None)
-bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
-                                  home_host=None, home_cwd='/home/claude/project')
+bridge._registry_update_host('kai', host='beastoin-agents-f1-mac-mini')
 
 workers = bridge.worker_manager.get_workers(caller_from='kai')
 mon = next((w for w in workers if w['name'] == 'mon'), None)
@@ -10124,10 +10118,8 @@ bridge.worker_manager.scan_tmux_sessions = lambda: {
 bridge._registry_add('kai', 'claude', 1)
 bridge._registry_add('luck', 'claude', 2)
 # Both on mac-mini
-bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
-                                  home_host=None, home_cwd='/home/claude/project')
-bridge._registry_update_teleport('luck', host='beastoin-agents-f1-mac-mini',
-                                  home_host=None, home_cwd='/home/claude/other')
+bridge._registry_update_host('kai', host='beastoin-agents-f1-mac-mini')
+bridge._registry_update_host('luck', host='beastoin-agents-f1-mac-mini')
 
 workers = bridge.worker_manager.get_workers(caller_from='kai')
 luck = next((w for w in workers if w['name'] == 'luck'), None)
@@ -10172,8 +10164,7 @@ bridge.worker_manager.scan_tmux_sessions = lambda: {
 bridge._registry_add('mon', 'claude', 1)
 bridge._registry_add('kai', 'claude', 2)
 # mon on bridge (None), kai on mac-mini
-bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
-                                  home_host=None, home_cwd='/home/claude/project')
+bridge._registry_update_host('kai', host='beastoin-agents-f1-mac-mini')
 
 workers = bridge.worker_manager.get_workers(caller_from='mon')
 kai = next((w for w in workers if w['name'] == 'kai'), None)
@@ -10215,8 +10206,7 @@ bridge.worker_manager.scan_tmux_sessions = lambda: {
 
 bridge._registry_add('mon', 'claude', 1)
 bridge._registry_add('kai', 'claude', 2)
-bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
-                                  home_host=None, home_cwd='/home/claude/project')
+bridge._registry_update_host('kai', host='beastoin-agents-f1-mac-mini')
 
 # No caller_from → behaves as bridge-POV (existing behavior)
 workers = bridge.worker_manager.get_workers()
@@ -10262,8 +10252,7 @@ bridge.worker_manager.scan_tmux_sessions = lambda: {
 
 bridge._registry_add('mon', 'claude', 1)
 bridge._registry_add('kai', 'claude', 2)
-bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
-                                  home_host=None, home_cwd='/home/claude/project')
+bridge._registry_update_host('kai', host='beastoin-agents-f1-mac-mini')
 
 workers = bridge.worker_manager.get_workers(caller_from='mon')
 mon = next((w for w in workers if w['name'] == 'mon'), None)
@@ -10703,38 +10692,7 @@ print('OK')
     fi
 }
 
-test_teleback_preflight_checks_essentials() {
-    info "Testing teleback has essential preflight checks..."
-
-    if "$PYTHON" -c "
-import inspect, bridge
-
-src = inspect.getsource(bridge.cmd_teleback)
-preflight_src = inspect.getsource(bridge._teleport_preflight_common)
-
-# Must check teleport_state (no concurrent teleport)
-assert 'teleport_state' in preflight_src or 'teleport_state' in src, \
-    'cmd_teleback should check for teleport already in progress'
-
-# Must check tool availability on target
-assert '_resolve_remote_tool' in src or 'run_teleport_preflight' in src or '_teleport_preflight_common' in src, \
-    'cmd_teleback should check tool availability on target'
-
-# Must check target reachable
-assert 'Cannot reach' in src or '_teleport_preflight_common' in src or 'run_teleport_preflight' in src, \
-    'cmd_teleback should check target host reachability'
-
-# Must suggest /pause in busy message
-assert 'pause' in preflight_src.lower() or 'pause' in src.lower(), \
-    'cmd_teleback busy message should suggest /pause'
-
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        success "teleback has essential preflight checks"
-    else
-        fail "teleback should have essential preflight checks"
-    fi
-}
+# test_teleback_preflight_checks_essentials removed — cmd_teleback no longer exists (teleport unification v0.52.17)
 
 test_teleport_end_to_end() {
     info "Testing teleport end-to-end flow (mocked SSH)..."
@@ -10817,8 +10775,6 @@ with patch('bridge._remote_run', side_effect=mock_remote_run), \
 data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
 w = data['workers']['lee']
 assert w.get('host') == 'mac', f'host should be mac after teleport, got {w}'
-assert w.get('home_host') is None, f'home_host should be None (was local)'
-assert w.get('home_cwd') == '/home/claude/myproject', f'home_cwd should preserve original'
 
 # Check teleport state file was cleaned up
 assert not (session_dir / 'teleport_state').exists(), 'teleport_state should be cleaned up'
@@ -10832,26 +10788,23 @@ assert has_exit, f'Should send /exit to stop worker'
 assert has_tmux_new, f'Should create tmux on target'
 assert has_set_env, f'Should set BRIDGE_URL on target'
 
-# Now test teleback
+# Now test teleport back (unified — same do_teleport, target=None for local)
 ssh_calls.clear()
-# After teleport, lee is on mac. Teleback should bring it local.
 with bridge.watchdog.lock:
     bridge.watchdog.worker_states['lee'] = ('READY', 'idle', 0)
 
-pid_call_count[0] = 0  # Reset for teleback
+pid_call_count[0] = 0  # Reset for teleport back
 with patch('bridge._remote_run', side_effect=mock_remote_run), \
      patch('subprocess.run', side_effect=lambda cmd, **kw: MagicMock(returncode=0, stdout='12345\n')), \
      patch('bridge._get_claude_pid', side_effect=mock_get_claude_pid), \
      patch('bridge.telegram_api'):
 
-    bridge.do_teleport('lee', None, '/home/claude/myproject', False, 123, workers=MockWorkers(), is_teleback=True)
+    bridge.do_teleport('lee', None, '/home/claude/myproject', False, 123, workers=MockWorkers())
 
 # Registry should be cleared
 data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
 w = data['workers']['lee']
-assert w.get('host') is None, f'host should be None after teleback, got {w}'
-assert w.get('home_host') is None, f'home_host should be cleared'
-assert w.get('home_cwd') is None, f'home_cwd should be cleared'
+assert w.get('host') is None, f'host should be None after teleport back, got {w}'
 
 # Restore
 bridge.NODE_DIR = orig_node
@@ -11167,7 +11120,7 @@ def mock_get_claude_pid(pane_pid, host=None):
         return None
     return '99999'
 
-orig_registry_update = bridge._registry_update_teleport
+orig_registry_update = bridge._registry_update_host
 def tracking_registry_update(*args, **kwargs):
     operation_log.append('registry_update')
     return orig_registry_update(*args, **kwargs)
@@ -11183,7 +11136,7 @@ def mock_remote_run(cmd, **kwargs):
 with patch('bridge._remote_run', side_effect=mock_remote_run), \
      patch('subprocess.run', side_effect=lambda cmd, **kw: MagicMock(returncode=0, stdout='12345\n')), \
      patch('bridge._get_claude_pid', side_effect=mock_get_claude_pid), \
-     patch('bridge._registry_update_teleport', side_effect=tracking_registry_update), \
+     patch('bridge._registry_update_host', side_effect=tracking_registry_update), \
      patch('bridge.telegram_api'), \
      patch('time.sleep'):
 
@@ -14063,7 +14016,7 @@ sessions.mkdir()
 (sessions / 'ren' / 'chat_id').write_text('123')
 
 # Registry: ren is teleported to mac-mini
-reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+reg = {'workers': {'ren': {'host': 'mac-mini'}}}
 (node_dir / 'workers.json').write_text(json.dumps(reg))
 
 orig_sessions = bridge.SESSIONS_DIR
@@ -14141,7 +14094,7 @@ sessions.mkdir()
 (sessions / 'ren').mkdir()
 (sessions / 'ren' / 'chat_id').write_text('123')
 
-reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+reg = {'workers': {'ren': {'host': 'mac-mini'}}}
 (node_dir / 'workers.json').write_text(json.dumps(reg))
 
 orig_sessions = bridge.SESSIONS_DIR
@@ -14233,7 +14186,7 @@ sessions.mkdir()
 (sessions / 'ren').mkdir()
 (sessions / 'ren' / 'chat_id').write_text('123')
 
-reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+reg = {'workers': {'ren': {'host': 'mac-mini'}}}
 (node_dir / 'workers.json').write_text(json.dumps(reg))
 
 orig_sessions = bridge.SESSIONS_DIR
@@ -14306,7 +14259,7 @@ tmpdir = tempfile.mkdtemp()
 node_dir = Path(tmpdir) / 'node'
 node_dir.mkdir()
 
-reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+reg = {'workers': {'ren': {'host': 'mac-mini'}}}
 (node_dir / 'workers.json').write_text(json.dumps(reg))
 
 orig_node_dir = bridge.NODE_DIR
@@ -14701,13 +14654,11 @@ assert w.get('host') == 'beastoin-agents-f1-mac-mini', f'host should survive re-
 assert w['chat_id'] == 456, f'chat_id should update to 456, got {w[\"chat_id\"]}'
 
 # Also test: teleport fields survive re-add
-bridge._registry_update_teleport('ivy', host='mac', home_host='vps', home_cwd='/home/proj')
+bridge._registry_update_host('ivy', host='mac')
 bridge._registry_add('ivy', 'claude', 789)
 data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
 w = data['workers']['ivy']
 assert w.get('host') == 'mac', f'teleport host should survive, got {w.get(\"host\")}'
-assert w.get('home_host') == 'vps', f'home_host should survive, got {w.get(\"home_host\")}'
-assert w.get('home_cwd') == '/home/proj', f'home_cwd should survive, got {w.get(\"home_cwd\")}'
 
 bridge.NODE_DIR = orig_node
 bridge.WORKER_REGISTRY_FILE = orig_reg
@@ -15123,7 +15074,7 @@ bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}regcheckin-'
 
 bridge._registry_add('ren', 'claude', 123)
 # Mark ren as teleported to a remote host
-bridge._registry_update_teleport('ren', 'remote-host', None, '/home/claude/omi')
+bridge._registry_update_host('ren', host='remote-host')
 
 # Remote path that does NOT exist on VPS
 remote_cwd = '/Users/beastoinagents/omi/omi-ren'
@@ -15207,7 +15158,7 @@ bridge.TMUX_PREFIX = '${TEST_TMUX_PREFIX}checkin-'
 bridge.admin_chat_id = 123
 
 bridge._registry_add('ren', 'claude', 123)
-bridge._registry_update_teleport('ren', host='mac-mini', home_host=None, home_cwd='/home/claude/omi')
+bridge._registry_update_host('ren', host='mac-mini')
 
 remote_restart_calls = []
 tg_messages = []
@@ -22066,7 +22017,7 @@ run_unit_tests() {
     run_test test_teleport_preflight_rejects_without_public_url
     run_test test_teleport_preflight_checks
     run_test test_teleport_preflight_checks_rsync_and_backend
-    run_test test_teleback_preflight_checks_essentials
+
     run_test test_teleport_end_to_end
     run_test test_sync_credentials_always_overwrites
     run_test test_sync_credentials_atomic_write

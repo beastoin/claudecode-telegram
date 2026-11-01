@@ -7658,10 +7658,10 @@ def handle_checkin_endpoint(handler: Handler, parsed: ParseResult) -> None:
             target_host = requested_host
             machines = get_machine_catalog()
             if target_host in machines and machines[target_host].ssh_target:
-                target_host = machines[target_host].ssh_target
+                target_host = str(machines[target_host].ssh_target)
             resolved_current = current_host
             if resolved_current and resolved_current in machines and machines[resolved_current].ssh_target:
-                resolved_current = machines[resolved_current].ssh_target
+                resolved_current = str(machines[resolved_current].ssh_target)
             if resolved_current != target_host:
                 if not confirm_teleport:
                     source_cwd = get_claude_session_cwd(name) or ""
@@ -7693,7 +7693,7 @@ def handle_checkin_endpoint(handler: Handler, parsed: ParseResult) -> None:
                 if chat_id is not None:
                     send_telegram_message(chat_id, f"Teleporting {name} to {target_host}... (checkin)")
                 _log(_LOG_INFO, "checkin", f"{name}: confirmed teleport to {target_host}, cwd={target_cwd}")
-                do_teleport(name, target_host, target_cwd, False, chat_id, _wm())
+                do_teleport(name, target_host, target_cwd, False, chat_id or 0, _wm())
                 backend_obj = get_backend(backend_name)
                 handler._send_text(200, _wm()._build_welcome(name, backend_obj))
                 return
@@ -10611,7 +10611,8 @@ class AlertRouter:
             pattern = r.get("match", "")
             if self._matches(str(pattern), signal):
                 targets: list[str] = []
-                for t in r.get("targets", []):
+                raw_targets = r.get("targets", [])
+                for t in raw_targets if isinstance(raw_targets, list) else []:
                     if t == "$worker":
                         if worker_name:
                             targets.append(worker_name)
