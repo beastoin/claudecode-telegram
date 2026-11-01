@@ -322,7 +322,7 @@ def test_health_alert_check_passes_signal_keys():
 
 def test_external_watchdog_no_collect_problems():
     """External watchdog should not have collect_problems function (removed)."""
-    src = Path("/home/claude/claudecode-telegram/bridge-watchdog.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "bridge-watchdog.py").read_text()
     assert (
         "def collect_problems" not in src
     ), "collect_problems should be removed — health signal checking is internal-only"
@@ -330,13 +330,13 @@ def test_external_watchdog_no_collect_problems():
 
 def test_external_watchdog_no_reconcile_alerts():
     """External watchdog should not have reconcile_alerts function (removed)."""
-    src = Path("/home/claude/claudecode-telegram/bridge-watchdog.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "bridge-watchdog.py").read_text()
     assert "def reconcile_alerts" not in src, "reconcile_alerts should be removed — dedup is internal-only"
 
 
 def test_external_watchdog_bridge_dead_still_alerts():
     """When bridge process is dead, external watchdog still fires Telegram + tmux alerts."""
-    src = Path("/home/claude/claudecode-telegram/bridge-watchdog.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "bridge-watchdog.py").read_text()
     assert "Bridge process not running" in src
     assert "telegram_send" in src
     assert "deliver_to_workers" in src
@@ -344,14 +344,14 @@ def test_external_watchdog_bridge_dead_still_alerts():
 
 def test_external_watchdog_http_dead_still_alerts():
     """When bridge HTTP is dead, external watchdog still fires Telegram + tmux alerts."""
-    src = Path("/home/claude/claudecode-telegram/bridge-watchdog.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "bridge-watchdog.py").read_text()
     assert "Bridge HTTP not responding" in src
     assert "telegram_send" in src
 
 
 def test_external_watchdog_no_health_signal_loop():
     """External watchdog main() should not iterate over health signals."""
-    src = Path("/home/claude/claudecode-telegram/bridge-watchdog.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "bridge-watchdog.py").read_text()
     assert (
         "collect_problems" not in src
     ), "main() should not call collect_problems — health evaluation moved to internal"
@@ -465,7 +465,7 @@ def test_no_emit_alert_without_signal():
     """Every _emit_alert() invocation in bridge.py passes signal= explicitly."""
     import re
 
-    src = Path("/home/claude/claudecode-telegram/bridge.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "bridge.py").read_text()
     # Match call sites only — skip the function definition (which has "def _emit_alert(")
     call_pattern = re.compile(r"(?<!def )_emit_alert\(")
     emit_calls = list(call_pattern.finditer(src))

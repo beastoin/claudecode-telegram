@@ -127,7 +127,7 @@ def test_teleback_command_removed():
 
 def test_teleback_references_removed():
     """No cmd_teleback references should remain in bridge.py."""
-    src = Path("/home/claude/claudecode-telegram/bridge.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "bridge.py").read_text()
     assert "cmd_teleback" not in src, "cmd_teleback references should be removed"
 
 
@@ -187,7 +187,8 @@ def test_registry_update_host_replaces_teleport_fields(tmp_path):
         }
     }))
 
-    with patch.object(bridge, "WORKER_REGISTRY_FILE", reg_file):
+    with patch.object(bridge, "WORKER_REGISTRY_FILE", reg_file), \
+         patch.object(bridge, "NODE_DIR", tmp_path):
         bridge._registry_update_host("hal", host="macmini")
 
     data = json.loads(reg_file.read_text())
