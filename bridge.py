@@ -7652,6 +7652,7 @@ def handle_checkin_endpoint(handler: Handler, parsed: ParseResult) -> None:
                 handler._send_text(400, f"Invalid cwd: {cwd_err}")
                 return
         registered = _wm().get_registered_sessions()
+        confirm_teleport = params.get("confirm", [None])[0] == "1"
         if requested_host and name in registered:
             current_host = get_worker_host(name)
             target_host = requested_host
@@ -7662,23 +7663,39 @@ def handle_checkin_endpoint(handler: Handler, parsed: ParseResult) -> None:
             if resolved_current and resolved_current in machines and machines[resolved_current].ssh_target:
                 resolved_current = machines[resolved_current].ssh_target
             if resolved_current != target_host:
+                if not confirm_teleport:
+                    source_cwd = get_claude_session_cwd(name) or ""
+                    suggested_cwd = _remap_path(source_cwd, target_host) if source_cwd else ""
+                    checkin_cmd = f'curl -s "$BRIDGE_URL/checkin?name={name}&host={requested_host}&confirm=1'
+                    if suggested_cwd:
+                        checkin_cmd += f"&cwd={suggested_cwd}"
+                    checkin_cmd += '"'
+                    breadcrumb = (
+                        f"HOST MISMATCH: you are on {current_host or 'local'}, "
+                        f"requested host is {target_host}.\n"
+                        f"To teleport and checkin, run:\n{checkin_cmd}"
+                    )
+                    _log(_LOG_INFO, "checkin", f"{name}: host mismatch current={current_host} requested={target_host}")
+                    handler._send_text(200, breadcrumb)
+                    return
+                r = _remote_run(["echo", "ok"], host=target_host, timeout=TIMEOUT_REMOTE_CMD)
+                if r.returncode != 0:
+                    handler._send_text(502, f"Cannot reach {target_host} via SSH")
+                    return
+                backend_name = get_worker_backend(name, registered[name])
+                preflight_fails = run_teleport_preflight(target_host, name, backend_name)
+                if preflight_fails:
+                    handler._send_text(412, f"Preflight failed: {', '.join(preflight_fails)}")
+                    return
                 source_cwd = get_claude_session_cwd(name) or ""
-                suggested_cwd = _remap_path(source_cwd, target_host) if source_cwd else ""
-                teleport_cmd = (
-                    f'curl -s -X POST "$BRIDGE_URL/teleport" '
-                    f'-H "Content-Type: application/json" '
-                    f'-d \'{{"name": "{name}", "target": "{target_host}"'
-                )
-                if suggested_cwd:
-                    teleport_cmd += f', "cwd": "{suggested_cwd}"'
-                teleport_cmd += "}'"
-                breadcrumb = (
-                    f"HOST MISMATCH: you are on {current_host or 'local'}, "
-                    f"requested host is {target_host}.\n"
-                    f"To teleport, run:\n{teleport_cmd}"
-                )
-                _log(_LOG_INFO, "checkin", f"{name}: host mismatch current={current_host} requested={target_host}")
-                handler._send_text(200, breadcrumb)
+                target_cwd = requested_cwd or (_remap_path(source_cwd, target_host) if source_cwd else "")
+                chat_id = get_manager_chat_id(name)
+                if chat_id is not None:
+                    send_telegram_message(chat_id, f"Teleporting {name} to {target_host}... (checkin)")
+                _log(_LOG_INFO, "checkin", f"{name}: confirmed teleport to {target_host}, cwd={target_cwd}")
+                do_teleport(name, target_host, target_cwd, False, chat_id, _wm())
+                backend_obj = get_backend(backend_name)
+                handler._send_text(200, _wm()._build_welcome(name, backend_obj))
                 return
         tmux_name = ""
         host = None

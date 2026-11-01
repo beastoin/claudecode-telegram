@@ -240,12 +240,12 @@ def test_transcript_rsync_uses_update():
 
 
 # ---------------------------------------------------------------------------
-# 5. Checkin with host param — auto-teleport
+# 5. Checkin with host param — breadcrumbs + confirm teleport
 # ---------------------------------------------------------------------------
 
 
 def test_checkin_host_mismatch_returns_breadcrumbs():
-    """GET /checkin?name=hal&host=macmini returns teleport breadcrumbs when host differs."""
+    """GET /checkin?name=hal&host=macmini returns breadcrumbs with confirm param."""
     from urllib.parse import urlparse
     import bridge
 
@@ -261,7 +261,7 @@ def test_checkin_host_mismatch_returns_breadcrumbs():
 
     assert handler.response_code == 200
     assert "HOST MISMATCH" in handler.response_body
-    assert "/teleport" in handler.response_body
+    assert "confirm=1" in handler.response_body
     assert "macmini" in handler.response_body
 
 
@@ -287,8 +287,8 @@ def test_checkin_same_host_no_teleport():
     assert handler.response_code == 200
 
 
-def test_checkin_host_mismatch_includes_teleport_command():
-    """Breadcrumbs include a ready-to-run curl command for POST /teleport."""
+def test_checkin_host_mismatch_breadcrumb_is_checkin_url():
+    """Breadcrumbs include a checkin URL with confirm=1, not POST /teleport."""
     from urllib.parse import urlparse
     import bridge
 
@@ -303,11 +303,77 @@ def test_checkin_host_mismatch_includes_teleport_command():
         bridge.handle_checkin_endpoint(handler, parsed)
 
     assert handler.response_code == 200
-    assert "POST" in handler.response_body
-    assert "/teleport" in handler.response_body
-    assert '"name": "hal"' in handler.response_body
-    assert '"target": "macmini"' in handler.response_body
+    assert "/checkin?" in handler.response_body
+    assert "confirm=1" in handler.response_body
+    assert "host=macmini" in handler.response_body
     assert "vps-local" in handler.response_body
+
+
+def test_checkin_confirm_teleports_then_checkin():
+    """GET /checkin?name=hal&host=macmini&confirm=1 teleports then returns welcome."""
+    from urllib.parse import urlparse
+    import bridge
+
+    teleport_calls = []
+
+    def mock_teleport(name, target_host, target_cwd, full, chat_id, workers):
+        teleport_calls.append({"name": name, "target": target_host})
+
+    handler = FakeCheckinHandler()
+    parsed = urlparse("/checkin?name=hal&host=macmini&confirm=1")
+
+    with ExitStack() as stack:
+        _checkin_mocks(stack, current_host=None)
+        stack.enter_context(patch("bridge.get_claude_session_cwd", return_value="/home/claude/project"))
+        stack.enter_context(patch("bridge.get_machine_catalog", return_value={}))
+        stack.enter_context(patch("bridge.run_teleport_preflight", return_value=[]))
+        stack.enter_context(patch("bridge._remote_run", return_value=MagicMock(returncode=0)))
+        stack.enter_context(patch("bridge.get_manager_chat_id", return_value=123))
+        stack.enter_context(patch("bridge.send_telegram_message"))
+        stack.enter_context(patch("bridge.do_teleport", side_effect=mock_teleport))
+        bridge.handle_checkin_endpoint(handler, parsed)
+
+    assert len(teleport_calls) == 1
+    assert teleport_calls[0]["name"] == "hal"
+    assert teleport_calls[0]["target"] == "macmini"
+    assert handler.response_code == 200
+
+
+def test_checkin_confirm_preflight_failure():
+    """GET /checkin with confirm=1 returns error when preflight fails."""
+    from urllib.parse import urlparse
+    import bridge
+
+    handler = FakeCheckinHandler()
+    parsed = urlparse("/checkin?name=hal&host=macmini&confirm=1")
+
+    with ExitStack() as stack:
+        _checkin_mocks(stack, current_host=None)
+        stack.enter_context(patch("bridge.get_claude_session_cwd", return_value="/home/claude/project"))
+        stack.enter_context(patch("bridge.get_machine_catalog", return_value={}))
+        stack.enter_context(patch("bridge.run_teleport_preflight", return_value=["rsync not found"]))
+        stack.enter_context(patch("bridge._remote_run", return_value=MagicMock(returncode=0)))
+        bridge.handle_checkin_endpoint(handler, parsed)
+
+    assert handler.response_code == 412
+
+
+def test_checkin_confirm_unreachable():
+    """GET /checkin with confirm=1 returns error when target unreachable."""
+    from urllib.parse import urlparse
+    import bridge
+
+    handler = FakeCheckinHandler()
+    parsed = urlparse("/checkin?name=hal&host=macmini&confirm=1")
+
+    with ExitStack() as stack:
+        _checkin_mocks(stack, current_host=None)
+        stack.enter_context(patch("bridge.get_claude_session_cwd", return_value="/home/claude/project"))
+        stack.enter_context(patch("bridge.get_machine_catalog", return_value={}))
+        stack.enter_context(patch("bridge._remote_run", return_value=MagicMock(returncode=1)))
+        bridge.handle_checkin_endpoint(handler, parsed)
+
+    assert handler.response_code == 502
 
 
 def test_checkin_without_host_unchanged():
