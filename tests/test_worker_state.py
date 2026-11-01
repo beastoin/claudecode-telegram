@@ -1,4 +1,4 @@
-"""Tests for minimal persistent worker state: {host, cwd, home_host, home_cwd}.
+"""Tests for minimal persistent worker state: {host, cwd}.
 
 CWD consolidated into workers.json registry (no more worker_cwds.json).
 Session ID authoritative from marker file (no mtime fallback for lifecycle).
@@ -249,56 +249,37 @@ def test_scan_does_not_write_marker(tmp_path, monkeypatch):
 # --- Teleport state transitions ---
 
 
-def test_teleport_preserves_home_on_double_teleport(tmp_path):
-    """A→B→C: do_teleport preserves original home (A), doesn't overwrite to B.
-
-    Tests the logic in do_teleport() that checks existing home before setting.
-    """
+def test_teleport_updates_host_on_double_teleport(tmp_path):
+    """A→B→C: _registry_update_host updates host to new target."""
     import bridge
 
     bridge._registry_add("hiro", "claude")
-    # Teleport A → B: record home = A
-    bridge._registry_update_teleport("hiro", host="machine-b", home_host="machine-a", home_cwd="/a/project")
+    bridge._registry_update_host("hiro", host="machine-b")
 
     data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
-    assert data["workers"]["hiro"]["home_host"] == "machine-a"
-    assert data["workers"]["hiro"]["home_cwd"] == "/a/project"
+    assert data["workers"]["hiro"]["host"] == "machine-b"
 
-    # Simulate what do_teleport does for B → C:
-    # It reads existing home and preserves it if set
-    existing = bridge._load_registry().get("workers", {}).get("hiro", {})
-    prev_home_host = existing.get("home_host")
-    prev_home_cwd = existing.get("home_cwd")
-    bridge._registry_update_teleport(
-        "hiro",
-        host="machine-c",
-        home_host=prev_home_host or "machine-b",
-        home_cwd=prev_home_cwd or "/b/project",
-    )
+    bridge._registry_update_host("hiro", host="machine-c")
 
     data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
     w = data["workers"]["hiro"]
     assert w["host"] == "machine-c"
-    assert w["home_host"] == "machine-a", "Home should stay at original A, not overwrite to B"
-    assert w["home_cwd"] == "/a/project"
 
 
-def test_teleback_clears_home(tmp_path):
-    """After teleback, home fields are cleared."""
+def test_teleport_back_clears_host(tmp_path):
+    """After teleporting back, host is cleared."""
     import bridge
 
     bridge._registry_add("iris", "claude")
-    bridge._registry_update_teleport("iris", host="mac-mini", home_host="vps", home_cwd="/home/claude/proj")
+    bridge._registry_update_host("iris", host="mac-mini")
 
     data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
-    assert data["workers"]["iris"]["home_host"] == "vps"
+    assert data["workers"]["iris"]["host"] == "mac-mini"
 
-    bridge._registry_clear_teleport("iris")
+    bridge._registry_update_host("iris", host=None)
 
     data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
     w = data["workers"]["iris"]
-    assert w.get("home_host") in (None, ""), "home_host should be cleared after teleback"
-    assert w.get("home_cwd") in (None, ""), "home_cwd should be cleared after teleback"
     assert w.get("host") is None, "host should be cleared (back to local)"
 
 
@@ -306,7 +287,7 @@ def test_teleback_clears_home(tmp_path):
 
 
 def test_minimal_record_fields(tmp_path):
-    """Registry entry contains the minimal fields: host, cwd, home_host, home_cwd."""
+    """Registry entry contains the minimal fields: host, cwd."""
     import bridge
 
     project = tmp_path / "project"
@@ -314,14 +295,12 @@ def test_minimal_record_fields(tmp_path):
 
     bridge._registry_add("kai", "claude")
     bridge._set_worker_cwd("kai", str(project))
-    bridge._registry_update_teleport("kai", host="mac", home_host="vps", home_cwd="/home/claude/proj")
+    bridge._registry_update_host("kai", host="mac")
 
     data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
     w = data["workers"]["kai"]
     assert w.get("host") == "mac"
     assert w.get("cwd") == str(project)
-    assert w.get("home_host") == "vps"
-    assert w.get("home_cwd") == "/home/claude/proj"
 
 
 def test_checkin_cwd_updates_registry(tmp_path):

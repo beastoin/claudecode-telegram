@@ -174,14 +174,12 @@ def test_registry_add_preserves_host():
     assert w.get("host") == "beastoin-agents-f1-mac-mini", f"host should survive re-add, got {w.get('host')}"
     assert w["chat_id"] == 456, f"chat_id should update to 456, got {w['chat_id']}"
 
-    # Also test: teleport fields survive re-add
-    bridge._registry_update_teleport("ivy", host="mac", home_host="vps", home_cwd="/home/proj")
+    # Also test: host field survives re-add
+    bridge._registry_update_host("ivy", host="mac")
     bridge._registry_add("ivy", "claude", 789)
     data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
     w = data["workers"]["ivy"]
-    assert w.get("host") == "mac", f"teleport host should survive, got {w.get('host')}"
-    assert w.get("home_host") == "vps", f"home_host should survive, got {w.get('home_host')}"
-    assert w.get("home_cwd") == "/home/proj", f"home_cwd should survive, got {w.get('home_cwd')}"
+    assert w.get("host") == "mac", f"host should survive, got {w.get('host')}"
 
     bridge.NODE_DIR = orig_node
     bridge.WORKER_REGISTRY_FILE = orig_reg

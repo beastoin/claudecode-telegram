@@ -473,7 +473,7 @@ def test_phase2_watchdog_capture_pane_passes_host():
     node_dir = Path(tmpdir) / "node"
     node_dir.mkdir()
 
-    reg = {"workers": {"ren": {"host": "mac-mini", "home_host": "localhost", "home_cwd": "/home/claude"}}}
+    reg = {"workers": {"ren": {"host": "mac-mini"}}}
     (node_dir / "workers.json").write_text(json.dumps(reg))
 
     orig_node_dir = bridge.NODE_DIR
@@ -1486,7 +1486,7 @@ class TestWatchdogHostDownSkip:
         node_dir.mkdir()
         reg = {
             "workers": {
-                "rem": {"host": "mac-test", "home_host": "localhost", "home_cwd": "/tmp"},
+                "rem": {"host": "mac-test"},
             }
         }
         (node_dir / "workers.json").write_text(__import__("json").dumps(reg))

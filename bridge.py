@@ -7083,51 +7083,6 @@ def teleport_notify(chat_id: ChatId | None, text: str) -> None:
         transport.send_text(chat_id, text)
 
 
-def check_teleback_conflicts(name: str, remote_host: str | None, local_cwd: str | None) -> list[str]:  # type: ignore[arg-type]
-    conflicts: list[str] = []
-    if not local_cwd or not remote_host:
-        return conflicts
-    local_is_git = os.path.isdir(os.path.join(local_cwd, ".git"))
-    if not local_is_git:
-        return conflicts
-    local_status = _subprocess_runner.run(
-        ["git", "-C", local_cwd, "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-        timeout=TIMEOUT_REMOTE_CMD,
-    )
-    local_changed = bool(local_status.stdout.strip()) if local_status.returncode == 0 else False
-    local_head = _subprocess_runner.run(
-        ["git", "-C", local_cwd, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=TIMEOUT_TMUX_SEND
-    )
-    local_commit = local_head.stdout.strip() if local_head.returncode == 0 else ""
-    remote_cwd = _remap_path(local_cwd, remote_host)
-    r_status = _remote_run(
-        ["git", "-C", remote_cwd, "status", "--porcelain"],
-        host=remote_host,
-        timeout=TIMEOUT_REMOTE_CMD,
-    )
-    remote_changed = bool(r_status.stdout.strip()) if r_status.returncode == 0 else False
-    r_head = _remote_run(
-        ["git", "-C", remote_cwd, "rev-parse", "HEAD"],
-        host=remote_host,
-        timeout=TIMEOUT_TMUX_SEND,
-    )
-    remote_commit = r_head.stdout.strip() if r_head.returncode == 0 else ""
-    if local_changed and remote_changed:
-        local_files = [l.strip().split(None, 1)[-1] for l in local_status.stdout.strip().splitlines()[:5]]
-        remote_files = [l.strip().split(None, 1)[-1] for l in r_status.stdout.strip().splitlines()[:5]]
-        conflicts.append(f"VPS has uncommitted changes: {', '.join(local_files)}")
-        conflicts.append(f"Remote has uncommitted changes: {', '.join(remote_files)}")
-    elif local_commit and remote_commit and local_commit != remote_commit:
-        if local_changed:
-            conflicts.append(f"VPS has uncommitted changes AND different commit than remote")
-        elif remote_changed:
-            conflicts.append(f"VPS has new commits since teleport (HEAD: {local_commit[:8]})")
-            conflicts.append(f"Remote has uncommitted changes (HEAD: {remote_commit[:8]})")
-    return conflicts
-
-
 def run_teleport_preflight(target_host: str, worker_name: str, backend_name: str) -> list[str]:  # type: ignore[arg-type]
     fails = []
     preflight_dirs = [
@@ -7192,7 +7147,7 @@ def rsync_working_directory(
 ) -> bool:
 
     _remote_run(["mkdir", "-p", target_cwd], host=target_host)
-    cmd = ["rsync", "-az", "--delete"]
+    cmd = ["rsync", "-az", "--update"]
     gitignore_tmpfile = None
     if not full:
         with _log_suppress(
@@ -7253,15 +7208,15 @@ def sync_session_transcript(
         if source_host:
             src_path = f"~/{source_dir}/{item}"
             local_dst = os.path.expanduser(f"~/{target_dir}/")
-            cmd = ["rsync", "-az", f"{source_host}:{src_path}", local_dst]
+            cmd = ["rsync", "-az", "--update", f"{source_host}:{src_path}", local_dst]
         elif target_host:
             local_src = os.path.expanduser(f"~/{source_dir}/{item}")
             dst_path = f"~/{target_dir}/"
-            cmd = ["rsync", "-az", local_src, f"{target_host}:{dst_path}"]
+            cmd = ["rsync", "-az", "--update", local_src, f"{target_host}:{dst_path}"]
         else:
             local_src = os.path.expanduser(f"~/{source_dir}/{item}")
             local_dst = os.path.expanduser(f"~/{target_dir}/")
-            cmd = ["rsync", "-az", local_src, local_dst]
+            cmd = ["rsync", "-az", "--update", local_src, local_dst]
         r = _subprocess_runner.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_RSYNC)
         if r.returncode != 0:
             _log(_LOG_WARN, "teleport", f"transcript sync failed for {item}: {r.stderr[:200]}")
@@ -7338,36 +7293,6 @@ def sync_shared_repos(target_host: str, chat_id: int | str | None = None) -> lis
     except (subprocess.SubprocessError, OSError) as e:
         _warn(f"shared repo sync: {e}")
     return warnings
-
-
-def sync_worker_data_back(name: str, source_host: str | None) -> None:
-    if not source_host:
-        return
-    home = os.path.expanduser("~")
-    worker_team_dir = os.path.join(home, "team", name)
-    if os.path.isdir(worker_team_dir):
-        _subprocess_runner.run(
-            ["rsync", "-az", f"{source_host}:team/{name}/", f"{worker_team_dir}/"],
-            capture_output=True,
-            timeout=TIMEOUT_GIT_OP,
-        )
-    r = _remote_run(
-        ["bash", "-c", "find ~/.claude/projects/*/memory -name '*.md' 2>/dev/null | head -50"],
-        host=source_host,
-        timeout=TIMEOUT_REMOTE_CMD,
-    )
-    if r.returncode == 0 and r.stdout.strip():
-        for remote_file in r.stdout.strip().splitlines():
-            remote_home = _get_remote_home(source_host)
-            if remote_home and remote_file.startswith(remote_home):
-                local_file = home + remote_file[len(remote_home) :]
-                local_dir = os.path.dirname(local_file)
-                os.makedirs(local_dir, exist_ok=True)
-                _subprocess_runner.run(
-                    ["rsync", "-az", f"{source_host}:{remote_file}", local_file],
-                    capture_output=True,
-                    timeout=TIMEOUT_REMOTE_CMD,
-                )
 
 
 def install_hooks_on_target(target_host: str) -> list[str]:
@@ -7718,6 +7643,7 @@ def handle_checkin_endpoint(handler: Handler, parsed: ParseResult) -> None:
         params = parse_qs(parsed.query)
         name = params.get("name", ["worker"])[0]
         raw_cwd = params.get("cwd", [None])[0]
+        requested_host = params.get("host", [None])[0]
         requested_cwd = ""
         if raw_cwd is not None:
             worker_host = get_worker_host(name)
@@ -7726,6 +7652,34 @@ def handle_checkin_endpoint(handler: Handler, parsed: ParseResult) -> None:
                 handler._send_text(400, f"Invalid cwd: {cwd_err}")
                 return
         registered = _wm().get_registered_sessions()
+        if requested_host and name in registered:
+            current_host = get_worker_host(name)
+            target_host = requested_host
+            machines = get_machine_catalog()
+            if target_host in machines and machines[target_host].ssh_target:
+                target_host = machines[target_host].ssh_target
+            resolved_current = current_host
+            if resolved_current and resolved_current in machines and machines[resolved_current].ssh_target:
+                resolved_current = machines[resolved_current].ssh_target
+            if resolved_current != target_host:
+                source_cwd = get_claude_session_cwd(name) or ""
+                suggested_cwd = _remap_path(source_cwd, target_host) if source_cwd else ""
+                teleport_cmd = (
+                    f'curl -s -X POST "$BRIDGE_URL/teleport" '
+                    f'-H "Content-Type: application/json" '
+                    f'-d \'{{"name": "{name}", "target": "{target_host}"'
+                )
+                if suggested_cwd:
+                    teleport_cmd += f', "cwd": "{suggested_cwd}"'
+                teleport_cmd += "}'"
+                breadcrumb = (
+                    f"HOST MISMATCH: you are on {current_host or 'local'}, "
+                    f"requested host is {target_host}.\n"
+                    f"To teleport, run:\n{teleport_cmd}"
+                )
+                _log(_LOG_INFO, "checkin", f"{name}: host mismatch current={current_host} requested={target_host}")
+                handler._send_text(200, breadcrumb)
+                return
         tmux_name = ""
         host = None
         if name in registered:
@@ -8323,8 +8277,6 @@ class WorkerRegistryEntry:
     chat_id: int | None = None
     hire_time: int = 0
     tools: dict[str, object] | None = None
-    home_host: str = ""
-    home_cwd: str = ""
 
 
 class WorkerRecord:
@@ -8338,8 +8290,6 @@ class WorkerRecord:
     tools: dict[str, object] | None = None
     chat_id: int | None = None
     cwd: str = ""
-    home_host: str = ""
-    home_cwd: str = ""
 
     @property
     def is_remote(self) -> bool:
@@ -8350,21 +8300,18 @@ class WorkerRecord:
         return self.backend == "claude"
 
 
-def _registry_update_teleport(name: str, host: str | None, home_host: str | None, home_cwd: str | None) -> None:
+def _registry_update_host(name: str, host: str | None) -> None:
     with watchdog.lock:
         data = _load_registry()
         worker = data.get("workers", {}).get(name, {})
-        for key, val in [("host", host), ("home_host", home_host), ("home_cwd", home_cwd)]:  # type: ignore[misc]
-            if val is not None:
-                worker[key] = val  # type: ignore[literal-required]
-            else:
-                worker.pop(key, None)  # type: ignore[misc]
+        if host is not None:
+            worker["host"] = host
+        else:
+            worker.pop("host", None)
+        worker.pop("home_host", None)
+        worker.pop("home_cwd", None)
         data.setdefault("workers", {})[name] = worker
         _save_registry(data)
-
-
-def _registry_clear_teleport(name: str) -> None:
-    _registry_update_teleport(name, host=None, home_host=None, home_cwd=None)
 
 
 def mark_hook_event(session_name: str) -> None:
@@ -8429,7 +8376,7 @@ def _registry_add(name: str, backend: str, chat_id: ChatId | None = None, host: 
         if "workers" not in data:
             data = {"version": 1, "workers": {}}
         existing = data.get("workers", {}).get(name, {})
-        preserved_keys = {"host", "home_host", "home_cwd", "cwd"}
+        preserved_keys = {"host", "cwd"}
         entry = {k: v for k, v in existing.items() if k in preserved_keys}
         entry.update(
             {
@@ -8702,7 +8649,6 @@ def do_teleport(
     full_sync: bool,
     chat_id: int | str,
     workers: object,
-    is_teleback: bool = False,
 ) -> None:
 
     try:
@@ -8768,16 +8714,15 @@ def do_teleport(
             teleport_notify(chat_id, "Syncing session transcript...")
             sync_session_transcript(session_id, source_cwd, target_cwd, source_host, target_host)
             _log(_LOG_INFO, "teleport", f"{name}: transcript sync done")
-        if not is_teleback:
-            teleport_notify(chat_id, "Syncing team config and hooks...")
-            sw = sync_shared_repos(target_host, chat_id)
-            hook_warnings = install_hooks_on_target(target_host)
-            all_warnings = sw + hook_warnings
-            if all_warnings:
-                teleport_notify(
-                    chat_id, f"Config sync completed with warnings:\n" + "\n".join(f"- {w}" for w in all_warnings)
-                )
-            _log(_LOG_WARN, "teleport", f"{name}: team config + hooks synced ({len(all_warnings)} warnings)")
+        teleport_notify(chat_id, "Syncing team config and hooks...")
+        sw = sync_shared_repos(target_host, chat_id)
+        hook_warnings = install_hooks_on_target(target_host)
+        all_warnings = sw + hook_warnings
+        if all_warnings:
+            teleport_notify(
+                chat_id, f"Config sync completed with warnings:\n" + "\n".join(f"- {w}" for w in all_warnings)
+            )
+        _log(_LOG_WARN, "teleport", f"{name}: team config + hooks synced ({len(all_warnings)} warnings)")
         _save_phase(2)
         save_claude_session_cwd(name, target_cwd)
         clear_claude_session_id(name)
@@ -8797,47 +8742,30 @@ def do_teleport(
                 name, tmux_name, source_host, source_cwd, session_id, backend_name, chat_id, "failed to start on target"
             )
             return
-        if is_teleback:
-            _registry_clear_teleport(name)
-        else:
-            existing = _load_registry().get("workers", {}).get(name, {})
-            prev_home_host = existing.get("home_host")
-            prev_home_cwd = existing.get("home_cwd")
-            _registry_update_teleport(
-                name,
-                host=target_host,
-                home_host=prev_home_host or source_host,
-                home_cwd=prev_home_cwd or source_cwd,
-            )
+        _registry_update_host(name, host=target_host)
         _remote_run(["tmux", "kill-session", "-t", tmux_name], host=source_host)
-        if is_teleback:
-            sync_worker_data_back(name, source_host)
-        if not is_teleback:
-            try:
-                backend_obj = get_backend(backend_name)
-                welcome = workers._build_welcome(name, backend_obj)  # type: ignore[attr-defined]
-                _clock.sleep(DELAY_PROCESS_SETTLE)
-                workers.send(name, welcome)  # type: ignore[attr-defined]
-                if source_host != target_host:
-                    ctx = _build_teleport_context(
-                        name=name,
-                        source_host=source_host,
-                        target_host=target_host,
-                        source_cwd=source_cwd,
-                        session_id=session_id,
-                    )
-                    _clock.sleep(0.5)
-                    workers.send(name, ctx)  # type: ignore[attr-defined]
-            except (ConnectionError, TimeoutError, AttributeError, OSError) as e:
-                _log(_LOG_WARN, "teleport", f"Warning: failed to send welcome to {name}: {e}")
+        try:
+            backend_obj = get_backend(backend_name)
+            welcome = workers._build_welcome(name, backend_obj)  # type: ignore[attr-defined]
+            _clock.sleep(DELAY_PROCESS_SETTLE)
+            workers.send(name, welcome)  # type: ignore[attr-defined]
+            if source_host != target_host:
+                ctx = _build_teleport_context(
+                    name=name,
+                    source_host=source_host,
+                    target_host=target_host,
+                    source_cwd=source_cwd,
+                    session_id=session_id,
+                )
+                _clock.sleep(0.5)
+                workers.send(name, ctx)  # type: ignore[attr-defined]
+        except (ConnectionError, TimeoutError, AttributeError, OSError) as e:
+            _log(_LOG_WARN, "teleport", f"Warning: failed to send welcome to {name}: {e}")
         state_file.unlink(missing_ok=True)
         dest_label = target_host or "local"
-        action = "teleported back" if is_teleback else "teleported"
-        msg = f"{name} {action} to {dest_label}:{target_cwd}"
+        msg = f"{name} teleported to {dest_label}:{target_cwd}"
         if session_id:
             msg += f"\nSession resumed ({session_id[:8]}...)."
-        if not is_teleback:
-            msg += f"\nUse /teleback {name} to bring it back."
         teleport_notify(chat_id, msg)
     except (
         subprocess.SubprocessError,
@@ -8859,7 +8787,7 @@ def do_teleport(
 def _teleport_preflight_common(
     router: object, worker_name: str, chat_id: ChatId, action: str = "teleport"
 ) -> dict[str, object] | None:
-    """Shared preflight for teleport/teleback: registry, busy, in-progress checks. Returns worker entry or None (already replied)."""
+    """Shared preflight for teleport: registry, busy, in-progress checks. Returns worker entry or None (already replied)."""
     registry = _load_registry()
     worker_entry = registry.get("workers", {}).get(worker_name)
     if not worker_entry:
@@ -9122,63 +9050,6 @@ def cmd_alert(router: object, arg: str, chat_id: ChatId) -> bool:
         router.reply(chat_id, f"No event matching id '{eid_prefix}'")  # type: ignore[attr-defined]
         return True
     router.reply(chat_id, "Usage: /alert [status|snooze <signal> [min]|history [count]|show <id>]")  # type: ignore[attr-defined]
-    return True
-
-
-def cmd_teleback(router: object, arg: str, chat_id: ChatId) -> bool:
-    parts = arg.split()
-    worker_name = parts[0].lower() if parts else ""
-    full_sync = "--full" in parts
-    if not worker_name:
-        router.reply(chat_id, "Usage: /teleback <worker> [--full]")  # type: ignore[attr-defined]
-        return True
-    worker = _teleport_preflight_common(router, worker_name, chat_id, "teleback")
-    if worker is None:
-        return True
-    current_host = worker.get("host")
-    home_host = worker.get("home_host")
-    home_cwd = worker.get("home_cwd")
-    if current_host is None and home_cwd is None:
-        router.reply(chat_id, f"{worker_name} hasn't been teleported.")  # type: ignore[attr-defined]
-        return True
-    target_host = home_host
-    target_cwd = home_cwd or get_claude_session_cwd(worker_name)
-    if target_host:
-        r = _remote_run(["echo", "ok"], host=target_host, timeout=TIMEOUT_REMOTE_CMD)  # type: ignore[arg-type]
-        if r.returncode != 0:
-            router.reply(chat_id, f"Cannot reach home host {target_host} via SSH.")  # type: ignore[attr-defined]
-            return True
-        for tool in ("claude", "tmux", "rsync"):
-            tool_path = _resolve_remote_tool(tool, target_host)  # type: ignore[arg-type]
-            if tool_path == tool:
-                router.reply(chat_id, f"{tool} not found on {target_host}. Install it first.")  # type: ignore[attr-defined]
-                return True
-    if current_host:
-        r = _remote_run(["echo", "ok"], host=current_host, timeout=TIMEOUT_REMOTE_CMD)  # type: ignore[arg-type]
-        if r.returncode != 0:
-            router.reply(chat_id, f"Cannot reach {current_host} where {worker_name} currently is.")  # type: ignore[attr-defined]
-            return True
-    if not full_sync:
-        conflicts = check_teleback_conflicts(worker_name, current_host, target_cwd)  # type: ignore[arg-type]
-        if conflicts:
-            router.reply(  # type: ignore[attr-defined]
-                chat_id,
-                f"Teleback conflict detected for {worker_name}:\n"
-                + "\n".join(f"  {c}" for c in conflicts)
-                + "\n\nUse /teleback "
-                + worker_name
-                + " --full to force sync "
-                "(remote overwrites local).",
-            )
-            return True
-    dest_label = home_host or "local"
-    router.reply(chat_id, f"Bringing {worker_name} back to {dest_label}...")  # type: ignore[attr-defined]
-    threading.Thread(
-        target=do_teleport,
-        args=(worker_name, target_host, target_cwd, full_sync, chat_id, router.workers, True),  # type: ignore[attr-defined]
-        name=f"teleback-{worker_name}",
-        daemon=True,
-    ).start()
     return True
 
 
@@ -9565,7 +9436,6 @@ class CommandRouter:
             "/pr": lambda arg, cid, mid: self.cmd_pr_review(arg, cid),  # type: ignore[attr-defined]
             "/teleport": lambda arg, cid, mid: self.cmd_teleport(arg, cid),  # type: ignore[attr-defined]
             "/teleport-check": lambda arg, cid, mid: self.cmd_teleport(arg, cid, check_only=True),  # type: ignore[attr-defined]
-            "/teleback": lambda arg, cid, mid: self.cmd_teleback(arg, cid),  # type: ignore[attr-defined]
             "/alert": lambda arg, cid, mid: self.cmd_alert(arg, cid),  # type: ignore[attr-defined]
         }
 
@@ -10258,7 +10128,6 @@ _install_delegates(
     [
         "cmd_teleport",
         "cmd_alert",
-        "cmd_teleback",
         "cmd_hire",
         "cmd_end",
         "cmd_restart",

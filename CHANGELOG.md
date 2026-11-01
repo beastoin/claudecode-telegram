@@ -1,5 +1,17 @@
 ## Changelog
 
+### v0.52.17 - Teleport unification + safe sync
+
+Unify teleport and teleback into a single `do_teleport()` — removing the `is_teleback` flag, `cmd_teleback`, `check_teleback_conflicts`, `sync_worker_data_back`, `_registry_update_teleport`, and `_registry_clear_teleport`. One direction, one code path.
+
+**Safe rsync** — `rsync_working_directory` and `sync_session_transcript` use `--update` instead of `--delete`, preserving newer files on the target. No more accidental overwrites of team config or session data.
+
+**Registry simplified** — `_registry_update_host(name, host)` replaces `_registry_update_teleport` and `_registry_clear_teleport`. Removes `home_host` and `home_cwd` fields from worker records — teleport is now stateless (just tracks current host).
+
+**Checkin host detection** — `GET /checkin?name=hal&host=macmini` detects host mismatch and returns breadcrumbs with a ready-to-run `POST /teleport` command. Does NOT auto-teleport — the worker or manager must explicitly trigger it. Machine catalog resolves friendly names (e.g. "macmini" → SSH target).
+
+**13 new tests**, 777 FAST pass (0 failures).
+
 ### v0.52.16 - Alert system consolidation with routing
 
 Consolidate overlapping internal/external alert systems into one mechanism with domain-based routing.

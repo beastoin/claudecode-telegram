@@ -121,21 +121,17 @@ def test_registry_teleport_fields():
     # Add a worker
     bridge._registry_add('lee', 'claude', 123)
 
-    # Update with teleport info
-    bridge._registry_update_teleport('lee', host='mac', home_host=None, home_cwd='/home/claude/proj')
+    # Update host
+    bridge._registry_update_host('lee', host='mac')
     data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
     w = data['workers']['lee']
     assert w['host'] == 'mac', f'host should be mac, got {w.get("host")}'
-    assert 'home_host' not in w, f'home_host should be removed when None'
-    assert w['home_cwd'] == '/home/claude/proj', f'home_cwd wrong'
 
-    # Clear teleport info (teleback)
-    bridge._registry_clear_teleport('lee')
+    # Clear host (teleport back)
+    bridge._registry_update_host('lee', host=None)
     data = json.loads(bridge.WORKER_REGISTRY_FILE.read_text())
     w = data['workers']['lee']
     assert w.get('host') is None, f'host should be cleared'
-    assert w.get('home_host') is None, f'home_host should be cleared'
-    assert w.get('home_cwd') is None, f'home_cwd should be cleared'
 
     bridge.NODE_DIR = orig_node
     bridge.WORKER_REGISTRY_FILE = orig_reg
@@ -262,8 +258,7 @@ def test_workers_send_example_ssh_for_teleported():
 
     # Register ren as teleported to mac mini
     bridge._registry_add('ren', 'claude', 123)
-    bridge._registry_update_teleport('ren', host='beastoin-agents-f1-mac-mini',
-                                      home_host=None, home_cwd='/home/claude/omi')
+    bridge._registry_update_host('ren', host='beastoin-agents-f1-mac-mini')
 
     workers = bridge.worker_manager.get_workers()
     ren = next((w for w in workers if w['name'] == 'ren'), None)
@@ -300,8 +295,7 @@ def test_workers_from_caller_remote_to_local_peer():
     bridge._registry_add('kai', 'claude', 1)
     bridge._registry_add('mon', 'claude', 2)
     # kai lives on mac-mini, mon lives on bridge host (None)
-    bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
-                                      home_host=None, home_cwd='/home/claude/project')
+    bridge._registry_update_host('kai', host='beastoin-agents-f1-mac-mini')
 
     workers = bridge.worker_manager.get_workers(caller_from='kai')
     mon = next((w for w in workers if w['name'] == 'mon'), None)
@@ -339,10 +333,8 @@ def test_workers_from_caller_same_remote_machine_bare():
     bridge._registry_add('kai', 'claude', 1)
     bridge._registry_add('luck', 'claude', 2)
     # Both on mac-mini
-    bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
-                                      home_host=None, home_cwd='/home/claude/project')
-    bridge._registry_update_teleport('luck', host='beastoin-agents-f1-mac-mini',
-                                      home_host=None, home_cwd='/home/claude/other')
+    bridge._registry_update_host('kai', host='beastoin-agents-f1-mac-mini')
+    bridge._registry_update_host('luck', host='beastoin-agents-f1-mac-mini')
 
     workers = bridge.worker_manager.get_workers(caller_from='kai')
     luck = next((w for w in workers if w['name'] == 'luck'), None)
@@ -379,8 +371,7 @@ def test_workers_from_caller_local_to_remote_peer():
     bridge._registry_add('mon', 'claude', 1)
     bridge._registry_add('kai', 'claude', 2)
     # mon on bridge (None), kai on mac-mini
-    bridge._registry_update_teleport('kai', host='beastoin-agents-f1-mac-mini',
-                                      home_host=None, home_cwd='/home/claude/project')
+    bridge._registry_update_host('kai', host='beastoin-agents-f1-mac-mini')
 
     workers = bridge.worker_manager.get_workers(caller_from='mon')
     kai = next((w for w in workers if w['name'] == 'kai'), None)
@@ -1771,7 +1762,7 @@ def test_checkin_cwd_accepts_remote_path_for_teleported_worker():
 
     bridge._registry_add('ren', 'claude', 123)
     # Mark ren as teleported to a remote host
-    bridge._registry_update_teleport('ren', 'remote-host', None, '/home/claude/omi')
+    bridge._registry_update_host('ren', host='remote-host')
     bridge.worker_manager.invalidate_sessions_cache()
 
     # Remote path that does NOT exist on VPS
@@ -1842,7 +1833,7 @@ def test_checkin_cwd_restart_uses_remote_for_teleported():
     bridge.admin_chat_id = 123
 
     bridge._registry_add('ren', 'claude', 123)
-    bridge._registry_update_teleport('ren', host='mac-mini', home_host=None, home_cwd='/home/claude/omi')
+    bridge._registry_update_host('ren', host='mac-mini')
     bridge.worker_manager.invalidate_sessions_cache()
 
     remote_restart_calls = []

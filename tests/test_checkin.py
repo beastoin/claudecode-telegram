@@ -169,7 +169,7 @@ def test_phase2_checkin_passes_host():
     (sessions / 'ren').mkdir()
     (sessions / 'ren' / 'chat_id').write_text('123')
 
-    reg = {'workers': {'ren': {'host': 'mac-mini', 'home_host': 'localhost', 'home_cwd': '/home/claude'}}}
+    reg = {'workers': {'ren': {'host': 'mac-mini'}}}
     (node_dir / 'workers.json').write_text(json.dumps(reg))
 
     orig_sessions = bridge.SESSIONS_DIR
