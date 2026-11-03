@@ -104,7 +104,7 @@ export function createServer(opts: ServerOptions): void {
 
   const server = Bun.serve({
     port: args.port,
-    hostname: "127.0.0.1",
+    hostname: "0.0.0.0",
     fetch(req: Request): Response | Promise<Response> {
       const url = new URL(req.url);
 
