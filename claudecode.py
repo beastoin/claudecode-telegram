@@ -113,12 +113,15 @@ from shared import (
     AppContext,
     Clock,
     CpuHogEntry,
+    CpuLoadDict,
     DiskUsageDict,
     GitPushStateResult,
     IoUsageDict,
     MachineHealthDict,
     MarkdownToken,
     MemUsageDict,
+    NetPrevDict,
+    NetUsageDict,
     OutputBinding,
     ProbeOutcome,
     ProcStatsEntry,
@@ -266,6 +269,11 @@ class HostHealthState:
         self.mem_alert: dict[str, ResourceAlertState] = {}
         self.io_usage: dict[str, IoUsageDict] = {}
         self.io_alert: dict[str, ResourceAlertState] = {}
+        self.cpu_load_usage: dict[str, CpuLoadDict] = {}
+        self.cpu_load_alert: dict[str, ResourceAlertState] = {}
+        self.net_usage: dict[str, NetUsageDict] = {}
+        self.net_alert: dict[str, ResourceAlertState] = {}
+        self._net_prev: dict[str, NetPrevDict] = {}
         self.tailscale_down: bool = False
         self.tailscale_alert_ts: float = 0.0
         self.tailscale_ref: str = ""

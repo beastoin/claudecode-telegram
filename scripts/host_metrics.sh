@@ -126,6 +126,37 @@ metric_worktree() {
     printf '{"total_gb":%s,"items":%s}\n' "$total_gb" "$items"
 }
 
+metric_cpu() {
+    load=$(python3 -c 'import os; l=os.getloadavg(); print(l[0], l[1], l[2])' 2>/dev/null)
+    read l1 l5 l15 <<< "$load"
+    if is_mac; then
+        ncpu=$(sysctl -n hw.ncpu 2>/dev/null)
+    else
+        ncpu=$(nproc 2>/dev/null)
+    fi
+    ncpu=${ncpu:-1}
+    norm1=$(awk "BEGIN{printf \"%.2f\", $l1/$ncpu}")
+    norm5=$(awk "BEGIN{printf \"%.2f\", $l5/$ncpu}")
+    norm15=$(awk "BEGIN{printf \"%.2f\", $l15/$ncpu}")
+    printf '{"load1":%s,"load5":%s,"load15":%s,"ncpu":%d,"norm1":%s,"norm5":%s,"norm15":%s}\n' \
+        "$l1" "$l5" "$l15" "$ncpu" "$norm1" "$norm5" "$norm15"
+}
+
+metric_net() {
+    if is_mac; then
+        netstat -ib 2>/dev/null | awk '
+            NR>1 && $1 !~ /^lo/ && $7 ~ /^[0-9]/ {rx+=$7; tx+=$10}
+            END {printf "{\"rx_bytes\":%d,\"tx_bytes\":%d}\n", rx+0, tx+0}
+        '
+    else
+        awk '!/lo:/ && /:/ {
+            gsub(/:$/,"",$1); rx+=$2; tx+=$10
+        } END {
+            printf "{\"rx_bytes\":%d,\"tx_bytes\":%d}\n", rx+0, tx+0
+        }' /proc/net/dev 2>/dev/null || echo '{"rx_bytes":0,"tx_bytes":0}'
+    fi
+}
+
 metric_tailscale() {
     if tailscale status --json 2>/dev/null | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('BackendState')=='Running' else 1)" 2>/dev/null; then
         echo '{"up":true}'
@@ -139,6 +170,8 @@ case "${1:-all}" in
     mem)        metric_mem ;;
     io)         metric_io ;;
     cpu_hogs)   metric_cpu_hogs ;;
+    cpu)        metric_cpu ;;
+    net)        metric_net ;;
     worktree)   metric_worktree ;;
     tailscale)  metric_tailscale ;;
     all)
@@ -146,6 +179,8 @@ case "${1:-all}" in
         echo '"disk":'$(metric_disk 2>/dev/null || echo null)','
         echo '"mem":'$(metric_mem 2>/dev/null || echo null)','
         echo '"io":'$(metric_io 2>/dev/null || echo null)','
+        echo '"cpu":'$(metric_cpu 2>/dev/null || echo null)','
+        echo '"net":'$(metric_net 2>/dev/null || echo null)','
         echo '"cpu_hogs":'$(metric_cpu_hogs 2>/dev/null || echo '[]')','
         echo '"worktree":'$(metric_worktree 2>/dev/null || echo null)','
         echo '"tailscale":'$(metric_tailscale 2>/dev/null || echo null)

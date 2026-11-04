@@ -2835,6 +2835,113 @@ def _probe_worktree_sizes(remote_hosts: set[str]) -> None:
     )
 
 
+def _probe_cpu_load_all_hosts(remote_hosts: set[str]) -> None:
+    _probe_metric(
+        remote_hosts,
+        metric="cpu",
+        usage_store=host_health.cpu_load_usage,
+        alert_state_store=host_health.cpu_load_alert,
+        cooldown=_res_cfg.cpu_load_cooldown,
+        re_alert_interval=_res_cfg.cpu_load_re_alert,
+        is_critical_fn=lambda u: u.get("norm5", 0) >= _res_cfg.cpu_load_norm5_threshold,
+        alert_fmt=lambda h, u: (
+            f"🔥 CPU load critical: {h}\n"
+            f"Load: {u['load1']:.1f} / {u['load5']:.1f} / {u['load15']:.1f} (1/5/15 min)\n"
+            f"Per-core (÷{u['ncpu']}): {u['norm5']:.2f} (threshold: {_res_cfg.cpu_load_norm5_threshold})"
+        ),
+        re_alert_fmt=lambda h, u, dur, n: (
+            f"🔥 CPU STILL overloaded: {h} (for {_fmt_duration(dur)}, alert #{n + 1})\n"
+            f"Load: {u['load1']:.1f} / {u['load5']:.1f} / {u['load15']:.1f} (1/5/15 min)\n"
+            f"Per-core (÷{u['ncpu']}): {u['norm5']:.2f}"
+        ),
+        recovery_fmt=lambda h, u: (
+            f"✅ CPU load recovered: {h} — load {u['load5']:.1f} " f"(per-core {u['norm5']:.2f})"
+        ),
+        category="CPU load",
+    )
+
+
+def _probe_net_all_hosts(remote_hosts: set[str]) -> None:
+    now = _clock.time()
+    for host in [None, *remote_hosts]:
+        if host and _is_host_down(host):
+            continue
+        host_label = host or "VPS"
+        counters = _run_metric("net", host)
+        if counters is None:
+            continue
+        rx_mbps = tx_mbps = 0.0
+        with watchdog.lock:
+            prev = host_health._net_prev.get(host_label)
+            if prev:
+                dt = now - prev.get("ts", now)
+                if dt > 0:
+                    drx = counters["rx_bytes"] - prev["rx_bytes"]
+                    dtx = counters["tx_bytes"] - prev["tx_bytes"]
+                    if drx >= 0 and dtx >= 0:
+                        rx_mbps = round(drx / dt / 1048576, 1)
+                        tx_mbps = round(dtx / dt / 1048576, 1)
+            host_health._net_prev[host_label] = {
+                "rx_bytes": counters["rx_bytes"],
+                "tx_bytes": counters["tx_bytes"],
+                "ts": now,
+            }
+        usage: NetUsageDict = {"rx_mbps": rx_mbps, "tx_mbps": tx_mbps, "ts": now}
+        peak = max(rx_mbps, tx_mbps)
+        is_crit = peak >= _res_cfg.net_mbps_threshold
+        alert_text = None
+        log_event = ""
+        prev_ref = ""
+        with watchdog.lock:
+            host_health.net_usage[host_label] = usage
+            state = host_health.net_alert.get(host_label)
+            if state is None:
+                state = ResourceAlertState()
+                host_health.net_alert[host_label] = state
+            if is_crit and not state.alerted:
+                if now - state.last_alert_ts >= _res_cfg.net_cooldown:
+                    alert_text = (
+                        f"🌐 Network bandwidth critical: {host_label}\n"
+                        f"RX: {rx_mbps:.1f} MB/s | TX: {tx_mbps:.1f} MB/s "
+                        f"(threshold: {_res_cfg.net_mbps_threshold:.0f} MB/s)"
+                    )
+                    log_event = "fire"
+                    state.fire(now)
+            elif is_crit and state.should_re_alert(now, _res_cfg.net_re_alert):
+                dur = state.duration(now)
+                count = state.re_alert_count + 1
+                alert_text = (
+                    f"🌐 Network STILL saturated: {host_label} "
+                    f"(for {_fmt_duration(dur)}, alert #{count + 1})\n"
+                    f"RX: {rx_mbps:.1f} MB/s | TX: {tx_mbps:.1f} MB/s"
+                )
+                log_event = "re-alert"
+                prev_ref = state.ref
+                state.fire(now)
+            elif not is_crit and state.alerted:
+                prev_ref = state.ref
+                state.recover()
+                alert_text = f"✅ Network recovered: {host_label} — " f"RX: {rx_mbps:.1f} MB/s | TX: {tx_mbps:.1f} MB/s"
+                log_event = "resolve"
+        if alert_text:
+            alert_key = f"net:{host_label}"
+            if log_event == "fire":
+                eid = _alert_log_append("fire", alert_key, desc=alert_text.splitlines()[0])
+                ref = eid[:6]
+                with watchdog.lock:
+                    state.ref = ref
+                alert_text += f"\nref:{ref}"
+            elif log_event == "re-alert":
+                _alert_log_append("re-alert", alert_key, desc=alert_text.splitlines()[0], ref=prev_ref)
+                if prev_ref:
+                    alert_text += f"\nref:{prev_ref}"
+            elif log_event == "resolve":
+                _alert_log_append("resolve", alert_key, desc=alert_text.splitlines()[0], ref=prev_ref)
+                if prev_ref:
+                    alert_text += f"\nref:{prev_ref}"
+            _watchdog_alert("Network", alert_text)
+
+
 def _probe_tailscale() -> None:
     now = _clock.time()
     result = _run_metric("tailscale")
@@ -3790,6 +3897,8 @@ def _watchdog_resource_checks(remote_hosts: set[str]) -> None:
         ("Disk", lambda: _probe_disk_all_hosts(remote_hosts)),
         ("Memory", lambda: _probe_mem_all_hosts(remote_hosts)),
         ("IO", lambda: _probe_io_all_hosts(remote_hosts)),
+        ("CPU load", lambda: _probe_cpu_load_all_hosts(remote_hosts)),
+        ("Network", lambda: _probe_net_all_hosts(remote_hosts)),
         ("CPU hog", lambda: _probe_cpu_hogs(remote_hosts)),
         ("Worktree", lambda: _probe_worktree_sizes(remote_hosts)),
         ("Tailscale", lambda: _probe_tailscale()),

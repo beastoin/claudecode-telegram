@@ -1,5 +1,15 @@
 ## Changelog
 
+### v0.52.18 - CPU load + network bandwidth monitoring
+
+Add CPU load average and network bandwidth to the watchdog resource monitoring for all connected machines (VPS + Mac Mini).
+
+**CPU load** — `metric_cpu` in `host_metrics.sh` collects load1/5/15, ncpu, and normalized per-core load (norm1/5/15). Bridge alerts when `norm5 >= 4.0` (4x sustained per-core load). Alert format shows all load averages and core count.
+
+**Network bandwidth** — `metric_net` collects cumulative rx/tx byte counters. Bridge computes MB/s rate between consecutive probes (no 1s delay in script). Alerts when either direction exceeds 500 MB/s. Handles counter wraparound (reboot) by resetting to 0.
+
+**Both metrics** follow the existing `_probe_metric()` pattern: cooldown (1h), re-alert (15min), recovery detection. Cross-platform (Linux + macOS). 25 new TDD tests.
+
 ### v0.52.17 - Teleport unification + safe sync
 
 Unify teleport and teleback into a single `do_teleport()` — removing the `is_teleback` flag, `cmd_teleback`, `check_teleback_conflicts`, `sync_worker_data_back`, `_registry_update_teleport`, and `_registry_clear_teleport`. One direction, one code path.

@@ -113,6 +113,29 @@ class IoUsageDict(TypedDict, total=False):
     ts: float
 
 
+class CpuLoadDict(TypedDict, total=False):
+    load1: float
+    load5: float
+    load15: float
+    ncpu: int
+    norm1: float
+    norm5: float
+    norm15: float
+    ts: float
+
+
+class NetUsageDict(TypedDict, total=False):
+    rx_mbps: float
+    tx_mbps: float
+    ts: float
+
+
+class NetPrevDict(TypedDict, total=False):
+    rx_bytes: int
+    tx_bytes: int
+    ts: float
+
+
 class WorktreeItemDict(TypedDict):
     path: str
     size_gb: float
@@ -1092,6 +1115,12 @@ class ResourceAlertConfig:
     io_iowait_pct: int = 30
     io_cooldown: int = 3600
     io_re_alert: int = 900
+    cpu_load_norm5_threshold: float = 4.0
+    cpu_load_cooldown: int = 3600
+    cpu_load_re_alert: int = 900
+    net_mbps_threshold: float = 500.0
+    net_cooldown: int = 3600
+    net_re_alert: int = 900
     infra_cooldown: int = 300
 
 
