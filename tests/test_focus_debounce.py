@@ -111,7 +111,7 @@ def _make_router():
 
 
 class TestFocusCommand:
-    """Only > name should set focus (plus /hire and startup)."""
+    """Only /name should set focus (plus /hire and startup)."""
 
     def test_focus_command_sets_active(self) -> None:
         import bridge
@@ -122,31 +122,17 @@ class TestFocusCommand:
         bridge.cmd_focus(router, "lee", 12345)
         assert bridge.state.active == "lee"
 
-    def test_angle_bracket_focus_sets_active(self) -> None:
-        """> name sets focus via _route_text_message."""
+    def test_slash_worker_bare_sets_focus(self) -> None:
+        """/worker (no arg) sets focus via handle_command."""
         import bridge
 
-        router, _sent = _make_router()
+        router, sent = _make_router()
         router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
         bridge.state.active = None
-        bridge.state.startup_notified = True
-        bridge.admin_chat_id = 12345
-        incoming = bridge.IncomingMessage(
-            text="> lee",
-            chat_id=12345,
-            msg_id=1,
-            raw_msg={"chat": {"id": 12345}, "message_id": 1, "text": "> lee"},
-            photo=None,
-            document=None,
-            animation=None,
-            video=None,
-            audio=None,
-            voice=None,
-            sticker=None,
-        )
-        with patch.object(bridge, "_TEXT_DEBOUNCE_WAIT", 999):
-            router._route_text_message(incoming)
+        result = router.handle_command("/lee", 12345, 1)
+        assert result is True
         assert bridge.state.active == "lee"
+        assert any("Now talking to" in m["text"] for m in sent)
 
     def test_bare_mention_no_focus_change(self) -> None:
         """@worker (no text) should NOT change focus."""
@@ -212,16 +198,17 @@ class TestFocusCommand:
         assert bridge.state.active == "finn"
         route_mock.assert_called_once()
 
-    def test_bare_slash_worker_no_focus_change(self) -> None:
-        """/worker (no arg) should NOT change focus either."""
+    def test_bare_slash_worker_switches_focus(self) -> None:
+        """/worker (no arg) should switch focus to that worker."""
         import bridge
 
-        router, _sent = _make_router()
+        router, sent = _make_router()
         router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
         bridge.state.active = "finn"
         result = router.handle_command("/lee", 12345, 1)
         assert result is True
-        assert bridge.state.active == "finn"
+        assert bridge.state.active == "lee"
+        assert any("Now talking to" in m["text"] for m in sent)
 
     def test_hire_still_sets_focus(self) -> None:
         """Hiring a new worker should still set focus to them."""

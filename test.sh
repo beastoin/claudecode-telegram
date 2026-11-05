@@ -18039,10 +18039,10 @@ test_direct_mode_e2e_focus_switch() {
 
     # Focus first worker
     local result
-    result=$(send_direct_mode_message ">focusworker1")
+    result=$(send_direct_mode_message "/focusworker1")
 
     if [[ "$result" != "OK" ]]; then
-        fail "Focus switch: > focusworker1 failed"
+        fail "Focus switch: /focusworker1 failed"
         send_direct_mode_message "/end focusworker1" >/dev/null 2>&1 || true
         send_direct_mode_message "/end focusworker2" >/dev/null 2>&1 || true
         return
@@ -18050,10 +18050,10 @@ test_direct_mode_e2e_focus_switch() {
     success "Focus switch: Focused focusworker1"
 
     # Switch focus to second worker
-    result=$(send_direct_mode_message ">focusworker2")
+    result=$(send_direct_mode_message "/focusworker2")
 
     if [[ "$result" != "OK" ]]; then
-        fail "Focus switch: > focusworker2 failed"
+        fail "Focus switch: /focusworker2 failed"
         send_direct_mode_message "/end focusworker1" >/dev/null 2>&1 || true
         send_direct_mode_message "/end focusworker2" >/dev/null 2>&1 || true
         return

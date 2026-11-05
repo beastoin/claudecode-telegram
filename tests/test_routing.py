@@ -186,7 +186,7 @@ class TestMentionRouting:
 
 
 class TestImplicitFocusRouting:
-    def test_bare_worker_name_does_not_focus(self):
+    def test_bare_worker_name_sets_focus(self):
         import bridge
 
         router, sent = _make_router()
@@ -194,7 +194,7 @@ class TestImplicitFocusRouting:
         bridge.state.active = "finn"
         result = router.handle_command("/lee", 12345, 1)
         assert result is True
-        assert bridge.state.active == "finn"
+        assert bridge.state.active == "lee"
 
     def test_worker_name_with_message_routes_no_focus(self):
         import bridge

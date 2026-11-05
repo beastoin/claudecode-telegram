@@ -2,19 +2,19 @@
 
 ### v0.52.19 - Focus simplification + message debounce
 
-Simplify focus logic: only `/focus` (plus `/hire` and startup) sets the active worker. Bare @mentions, double-mention auto-focus, and `/workername` implicit focus are all removed.
+Simplify focus logic: `/name` (bare slash-worker with no args) sets focus. `/hire` and startup also set focus. Bare @mentions and double-mention auto-focus are removed. The separate `/focus` command is removed.
 
-**Focus expiry** — 30-minute inactivity timer. If no message is sent to the focused worker for 30 minutes, focus clears automatically with a Telegram notice ("Focus on X expired (30min idle). Use /focus to pick someone."). Timer resets on every message routed to the active worker. Checked in the watchdog loop (~4s cycle).
+**Focus expiry** — 30-minute inactivity timer. If no message is sent to the focused worker for 30 minutes, focus clears automatically with a Telegram notice. Timer resets on every message routed to the active worker. Checked in the watchdog loop (~4s cycle).
 
 **Message debounce** — buffer incoming text messages for 1.0s before routing. When Telegram splits a long message into multiple parts, the debounce window combines them and applies routing logic to the combined text. This prevents split messages from being misrouted to the focused worker when the full text was intended for another worker via @mention. Commands (`/`) bypass the debounce buffer and flush any pending messages immediately.
 
 **Routing changes:**
-- `@name message` — routes to named worker as one-off, does NOT change focus (was: switched focus)
+- `/name` (bare) — sets focus to that worker (replaces `/focus name`)
+- `/name message` — routes as one-off, does NOT change focus
+- `@name message` — routes to named worker as one-off, does NOT change focus
 - Double @mention — no auto-focus (tracking removed entirely)
-- `/workername message` — routes as one-off, does NOT change focus (was: switched focus)
-- `/workername` (bare) — ignored (was: treated as `/focus workername`)
 
-19 new tests + 4 updated existing tests.
+20 new tests + 4 updated existing tests.
 
 ### v0.52.18 - CPU load + network bandwidth monitoring
 

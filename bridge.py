@@ -6732,7 +6732,7 @@ def cmd_status(router: CommandRouter, chat_id: int) -> bool:
 
 def cmd_focus(router: CommandRouter, name: str, chat_id: int) -> bool:
     if not name:
-        router.reply(chat_id, "Usage: > <name>", outcome="Needs decision")
+        router.reply(chat_id, "Usage: /name", outcome="Needs decision")
         return True
     name = name.lower().strip()
 
@@ -9645,7 +9645,7 @@ class CommandRouter:
         if not self._check_admin(chat_id):
             return True
         if not state.active and not self.parse_at_mentions(text)[0]:
-            self.reply(chat_id, "No focused worker. Use > <name> or @worker in caption.")
+            self.reply(chat_id, "No focused worker. Use /name or @worker in caption.")
             return True
         download_target = self._resolve_media_target(text, msg)
         local_path = download_telegram_file(file_id, download_target)
@@ -9720,16 +9720,6 @@ class CommandRouter:
             _record_message(incoming.msg_id, text, "manager", msg.get("date"), reply_to_msg_id)
         if text.startswith("/") and self.handle_command(text, chat_id, incoming.msg_id):
             self._flush_text_debounce()
-            return
-        focus_match = re.match(r"^>\s*(\S+)\s*$", text)
-        if focus_match:
-            self._flush_text_debounce()
-            name = focus_match.group(1).lower()
-            ok, err = switch_session(name)
-            if ok:
-                self.reply(chat_id, f"Now talking to {name.capitalize()}.")
-            else:
-                self.reply(chat_id, f'Could not focus "{name}". {err}', outcome="Needs decision")
             return
         with self._debounce_lock:
             self._debounce_buffer.append(incoming)
@@ -9811,6 +9801,11 @@ class CommandRouter:
         registered = self.workers.get_registered_sessions()
         if worker_name in registered:
             if not arg:
+                ok, err = switch_session(worker_name)
+                if ok:
+                    self.reply(chat_id, f"Now talking to {worker_name.capitalize()}.")
+                else:
+                    self.reply(chat_id, f'Could not focus "{worker_name}". {err}', outcome="Needs decision")
                 return True
             self.route_message(worker_name, arg, chat_id, msg_id, one_off=True)
             return True
@@ -11083,7 +11078,7 @@ def _check_focus_expiry() -> bool:
         with suppress(Exception):
             if admin_chat_id:
                 send_telegram_message(
-                    admin_chat_id, f"Focus on {name} expired (30min idle). Use > <name> to pick someone."
+                    admin_chat_id, f"Focus on {name} expired (30min idle). Use /name to pick someone."
                 )
         return True
     return False
