@@ -14117,12 +14117,15 @@ update = {
     }
 }
 
+import time
 with patch('bridge._send_interactive_reply', side_effect=mock_sir), \
      patch('bridge._read_tmux_activity', return_value=('Waiting', None, ['line1', 'line2'])), \
      patch('bridge._extract_question_details', return_value=details), \
      patch('bridge.get_worker_backend', return_value='claude'), \
+     patch.object(bridge, '_TEXT_DEBOUNCE_WAIT', 0), \
      patch.object(bridge.CommandRouter, 'reply', mock_reply):
     router.handle_message(update)
+    time.sleep(0.1)
 
 assert len(sir_calls) >= 1, f'Expected _send_interactive_reply call, got {sir_calls}'
 assert sir_calls[0]['host'] == 'mac-mini', f'Expected host=mac-mini, got {sir_calls[0][\"host\"]}'
