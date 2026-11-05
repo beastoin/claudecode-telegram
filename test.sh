@@ -5678,14 +5678,14 @@ print('OK')
     fi
 }
 
-test_auto_focus_on_consecutive_mentions() {
-    info "Testing auto-focus after 2 consecutive @mentions to same worker..."
+test_mentions_never_change_focus() {
+    info "Testing @mentions never change focus (no auto-focus)..."
 
     if "$PYTHON" -c "
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import bridge
 
 # Set up temp dirs for isolation
@@ -5701,7 +5701,6 @@ orig_node_dir = bridge.NODE_DIR
 orig_last_active = bridge.LAST_ACTIVE_FILE
 orig_admin = bridge.admin_chat_id
 orig_state = bridge.state.snapshot()
-orig_mention = bridge._last_mention.snapshot()
 
 # Override paths
 bridge.SESSIONS_DIR = sessions_dir
@@ -5730,61 +5729,33 @@ router.route_to_active = MagicMock()
 def make_msg(text):
     return {'update_id': 1, 'message': {'message_id': 1, 'chat': {'id': 123}, 'text': text}}
 
-# Reset state
+# Reset state — focus on bob
 bridge.state.active = 'bob'
 bridge.state.startup_notified = True
-bridge._last_mention.target = None
-bridge._last_mention.count = 0
-mock_api.sent.clear()
 
-# Test 1: First @alice mention — no focus switch
-router.handle_message(make_msg('@alice do task 1'))
-assert bridge.state.active == 'bob', f'T1: should stay bob, got {bridge.state.active}'
-assert bridge._last_mention.target == 'alice', f'T1: tracker target should be alice'
-assert bridge._last_mention.count == 1, f'T1: count should be 1, got {bridge._last_mention.count}'
+# Prevent debounce timers from firing
+with patch.object(bridge, '_TEXT_DEBOUNCE_WAIT', 999):
+    # Test 1: Single @alice mention — focus stays on bob
+    mock_api.sent.clear()
+    router.handle_message(make_msg('@alice do task 1'))
+    assert bridge.state.active == 'bob', f'T1: should stay bob, got {bridge.state.active}'
 
-# Test 2: Second @alice mention — auto-focus switches to alice
-router.handle_message(make_msg('@alice do task 2'))
-assert bridge.state.active == 'alice', f'T2: should switch to alice, got {bridge.state.active}'
-assert any('Switched to alice' in s for s in mock_api.sent), f'T2: should notify auto-focus, sent: {mock_api.sent}'
+    # Test 2: Second consecutive @alice mention — still no focus change
+    mock_api.sent.clear()
+    router.handle_message(make_msg('@alice do task 2'))
+    assert bridge.state.active == 'bob', f'T2: should stay bob, got {bridge.state.active}'
+    assert not any('Switched to' in s for s in mock_api.sent), f'T2: no focus switch notification'
 
-# Test 3: Third @alice mention — already focused, no duplicate notification
-mock_api.sent.clear()
-router.handle_message(make_msg('@alice do task 3'))
-assert bridge.state.active == 'alice', f'T3: should stay alice'
-assert not any('Switched to' in s for s in mock_api.sent), f'T3: should not re-notify when already focused'
+    # Test 3: Third @alice — still bob
+    mock_api.sent.clear()
+    router.handle_message(make_msg('@alice do task 3'))
+    assert bridge.state.active == 'bob', f'T3: should stay bob'
 
-# Test 4: @bob then @alice — different workers, no focus switch
-bridge.state.active = 'bob'
-bridge._last_mention.target = None
-bridge._last_mention.count = 0
-mock_api.sent.clear()
-router.handle_message(make_msg('@bob do X'))
-router.handle_message(make_msg('@alice do Y'))
-assert bridge.state.active == 'bob', f'T4: should stay bob after different mentions'
-assert bridge._last_mention.target == 'alice', f'T4: tracker should be alice'
-assert bridge._last_mention.count == 1, f'T4: count should be 1'
-
-# Test 5: @alice then plain message then @alice — streak reset, no focus
-bridge.state.active = 'bob'
-bridge._last_mention.target = None
-bridge._last_mention.count = 0
-mock_api.sent.clear()
-router.handle_message(make_msg('@alice do X'))
-router.handle_message(make_msg('just a plain message'))
-router.handle_message(make_msg('@alice do Y'))
-assert bridge.state.active == 'bob', f'T5: should stay bob, streak was reset'
-assert bridge._last_mention.count == 1, f'T5: count should be 1 after reset+mention'
-
-# Test 6: Multi-mention resets streak, no focus switch
-bridge.state.active = 'bob'
-bridge._last_mention.target = 'alice'
-bridge._last_mention.count = 1
-mock_api.sent.clear()
-router.handle_message(make_msg('@alice @bob do both'))
-assert bridge.state.active == 'bob', f'T6: multi-mention should not switch focus'
-assert bridge._last_mention.target is None, f'T6: multi-mention should reset target'
-assert bridge._last_mention.count == 0, f'T6: multi-mention should reset count'
+    # Test 4: Multiple different mentions — still bob
+    mock_api.sent.clear()
+    router.handle_message(make_msg('@bob do X'))
+    router.handle_message(make_msg('@alice do Y'))
+    assert bridge.state.active == 'bob', f'T4: should stay bob'
 
 # Restore originals
 bridge.SESSIONS_DIR = orig_sessions_dir
@@ -5792,16 +5763,15 @@ bridge.NODE_DIR = orig_node_dir
 bridge.LAST_ACTIVE_FILE = orig_last_active
 bridge.admin_chat_id = orig_admin
 bridge.state.restore(orig_state)
-bridge._last_mention.restore(orig_mention)
 
 import shutil
 shutil.rmtree(tmpdir)
 
 print('OK')
 " 2>/dev/null | grep -q "OK"; then
-        success "auto-focus on consecutive @mentions works correctly"
+        success "mentions never change focus (no auto-focus)"
     else
-        fail "auto-focus on consecutive mentions test failed"
+        fail "mentions never change focus test failed"
     fi
 }
 
@@ -6555,7 +6525,9 @@ router.telegram = MagicMock()
 
 # Manager replies to luck's message (which contains a GIF) with "@bob check this gif"
 # The reply message itself is TEXT only — the GIF is in reply_to_message
-with patch('bridge.download_telegram_file', return_value='/tmp/forwarded.gif'):
+# Disable debounce so routing happens immediately in test
+with patch('bridge.download_telegram_file', return_value='/tmp/forwarded.gif'), \
+     patch.object(bridge, '_TEXT_DEBOUNCE_WAIT', 0):
     update = {
         'message': {
             'chat': {'id': 12345},
@@ -6576,6 +6548,7 @@ with patch('bridge.download_telegram_file', return_value='/tmp/forwarded.gif'):
         }
     }
     router.handle_message(update)
+    import time; time.sleep(0.1)  # let the 0-second timer fire
 
 # Bob should have received a message with the GIF path
 send_calls = mock_workers.send.call_args_list
@@ -21926,7 +21899,7 @@ run_unit_tests() {
     run_test test_watchdog_resolved_alert
     run_test test_handle_watchdog_transition
     run_test test_parse_at_mentions
-    run_test test_auto_focus_on_consecutive_mentions
+    run_test test_mentions_never_change_focus
     run_test test_format_watchdog_status_pure
     run_test test_stuck_duration_uses_reason_age_not_since
     run_test test_switch_session

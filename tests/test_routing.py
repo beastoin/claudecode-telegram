@@ -17,6 +17,7 @@ def _bridge_env(monkeypatch, tmp_path):
     monkeypatch.setenv("BRIDGE_SESSIONS_DIR", str(sessions))
     monkeypatch.setenv("TEAM_DIR", str(tmp_path / "team"))
     import bridge
+
     saved = {
         "SESSIONS_DIR": bridge.SESSIONS_DIR,
         "WORKER_REGISTRY_FILE": bridge.WORKER_REGISTRY_FILE,
@@ -49,14 +50,17 @@ def _bridge_env(monkeypatch, tmp_path):
 
 def _make_router():
     import bridge
+
     sent: list[dict[str, object]] = []
 
     class FakeTransport:
         def send_text(self, chat_id, text, **kw):
             sent.append({"chat_id": chat_id, "text": text, **kw})
             return {"ok": True, "result": {"message_id": 1}}
+
         def send_message(self, chat_id, text, **kw):
             return self.send_text(chat_id, text, **kw)
+
         def set_reaction(self, *a, **kw):
             pass
 
@@ -68,81 +72,112 @@ def _make_router():
 
 
 class TestMentionRouting:
-    def test_bare_mention_switches_focus(self):
+    def test_bare_mention_does_not_switch_focus(self):
         import bridge
+
         router, sent = _make_router()
         router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
-        bridge.state.active = None
+        bridge.state.active = "finn"
         router._handle_mention_routing(
-            targets=["lee"], message="", text=" @lee ",
-            chat_id=12345, msg_id=1,
-            reply_to=None, reply_context="", reply_context_ts=None,
+            targets=["lee"],
+            message="",
+            text=" @lee ",
+            chat_id=12345,
+            msg_id=1,
+            reply_to=None,
+            reply_context="",
+            reply_context_ts=None,
         )
-        assert bridge.state.active == "lee"
+        assert bridge.state.active == "finn"
 
     def test_mention_with_message_routes_to_worker(self):
         import bridge
+
         router, sent = _make_router()
         router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
         route_mock = MagicMock(return_value={"name": "lee", "status": "sent"})
         router._route_mention = route_mock
         router._handle_mention_routing(
-            targets=["lee"], message="build the feature",
+            targets=["lee"],
+            message="build the feature",
             text="@lee build the feature",
-            chat_id=12345, msg_id=1,
-            reply_to=None, reply_context="", reply_context_ts=None,
+            chat_id=12345,
+            msg_id=1,
+            reply_to=None,
+            reply_context="",
+            reply_context_ts=None,
         )
         route_mock.assert_called_once_with("lee", "build the feature", 12345, 1)
 
     def test_offline_mention_warns(self):
         import bridge
+
         router, sent = _make_router()
         router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
         router._route_mention = MagicMock(return_value={"name": "lee", "status": "offline"})
         router._handle_mention_routing(
-            targets=["lee"], message="hello",
+            targets=["lee"],
+            message="hello",
             text="@lee hello",
-            chat_id=12345, msg_id=1,
-            reply_to=None, reply_context="", reply_context_ts=None,
+            chat_id=12345,
+            msg_id=1,
+            reply_to=None,
+            reply_context="",
+            reply_context_ts=None,
         )
         assert any("offline" in str(s["text"]).lower() for s in sent)
 
-    def test_auto_focus_after_two_mentions(self):
+    def test_double_mention_does_not_auto_focus(self):
         import bridge
+
         router, sent = _make_router()
         router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
         router._route_mention = MagicMock(return_value={"name": "lee", "status": "sent"})
         bridge.state.active = "finn"
-        router._reset_mention_streak()
         router._handle_mention_routing(
-            targets=["lee"], message="first message",
+            targets=["lee"],
+            message="first message",
             text="@lee first message",
-            chat_id=12345, msg_id=1,
-            reply_to=None, reply_context="", reply_context_ts=None,
+            chat_id=12345,
+            msg_id=1,
+            reply_to=None,
+            reply_context="",
+            reply_context_ts=None,
         )
         assert bridge.state.active == "finn"
         router._handle_mention_routing(
-            targets=["lee"], message="second message",
+            targets=["lee"],
+            message="second message",
             text="@lee second message",
-            chat_id=12345, msg_id=2,
-            reply_to=None, reply_context="", reply_context_ts=None,
+            chat_id=12345,
+            msg_id=2,
+            reply_to=None,
+            reply_context="",
+            reply_context_ts=None,
         )
-        assert bridge.state.active == "lee"
-        assert any("twice" in str(s["text"]).lower() for s in sent)
+        assert bridge.state.active == "finn"
+        assert not any("twice" in str(s["text"]).lower() for s in sent)
 
     def test_multi_target_mention_delivers_to_all(self):
         import bridge
+
         router, sent = _make_router()
-        router.workers.get_registered_sessions = MagicMock(return_value={
-            "lee": {"tmux": "claude-test-lee"},
-            "finn": {"tmux": "claude-test-finn"},
-        })
+        router.workers.get_registered_sessions = MagicMock(
+            return_value={
+                "lee": {"tmux": "claude-test-lee"},
+                "finn": {"tmux": "claude-test-finn"},
+            }
+        )
         router._route_mention = MagicMock(return_value={"name": "x", "status": "sent"})
         router._handle_mention_routing(
-            targets=["lee", "finn"], message="hello both",
+            targets=["lee", "finn"],
+            message="hello both",
             text="@lee @finn hello both",
-            chat_id=12345, msg_id=1,
-            reply_to=None, reply_context="", reply_context_ts=None,
+            chat_id=12345,
+            msg_id=1,
+            reply_to=None,
+            reply_context="",
+            reply_context_ts=None,
         )
         assert router._route_mention.call_count == 2
 
@@ -151,17 +186,19 @@ class TestMentionRouting:
 
 
 class TestImplicitFocusRouting:
-    def test_bare_worker_name_as_command_focuses(self):
+    def test_bare_worker_name_does_not_focus(self):
         import bridge
+
         router, sent = _make_router()
         router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
-        bridge.state.active = None
+        bridge.state.active = "finn"
         result = router.handle_command("/lee", 12345, 1)
         assert result is True
-        assert bridge.state.active == "lee"
+        assert bridge.state.active == "finn"
 
-    def test_worker_name_with_message_routes(self):
+    def test_worker_name_with_message_routes_no_focus(self):
         import bridge
+
         router, sent = _make_router()
         router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
         bridge.state.active = "finn"
@@ -169,11 +206,12 @@ class TestImplicitFocusRouting:
         router.route_message = route_mock
         result = router.handle_command("/lee build it", 12345, 1)
         assert result is True
-        assert bridge.state.active == "lee"
+        assert bridge.state.active == "finn"
         route_mock.assert_called_once()
 
     def test_unknown_command_returns_false(self):
         import bridge
+
         router, sent = _make_router()
         router.workers.get_registered_sessions = MagicMock(return_value={})
         result = router.handle_command("/unknowncmd", 12345, 1)
@@ -186,18 +224,19 @@ class TestImplicitFocusRouting:
 class TestRemoteFileLocalization:
     def test_fetch_remote_file_success(self, tmp_path):
         import bridge
+
         mock_runner = MagicMock()
         result = MagicMock()
         result.returncode = 0
         mock_runner.run.return_value = result
-        with patch.object(bridge, "_subprocess_runner", mock_runner), \
-             patch("os.path.getsize", return_value=1024):
+        with patch.object(bridge, "_subprocess_runner", mock_runner), patch("os.path.getsize", return_value=1024):
             local = bridge._fetch_remote_file("remote-host", "/tmp/test.png")
         assert local is not None
         assert "test.png" in local
 
     def test_fetch_remote_file_rsync_failure(self):
         import bridge
+
         mock_runner = MagicMock()
         result = MagicMock()
         result.returncode = 1
@@ -209,6 +248,7 @@ class TestRemoteFileLocalization:
 
     def test_localize_media_no_host_passes_through(self):
         import bridge
+
         media = [("/tmp/a.png", "photo"), ("/tmp/b.pdf", "doc")]
         with patch.object(bridge, "get_worker_host", return_value=None):
             result = bridge._localize_media("lee", media)
@@ -216,19 +256,25 @@ class TestRemoteFileLocalization:
 
     def test_localize_media_fetches_from_remote(self):
         import bridge
+
         media = [("/remote/a.png", "photo")]
-        with patch.object(bridge, "get_worker_host", return_value="remote-host"), \
-             patch.object(bridge, "_fetch_remote_file", return_value="/tmp/local-a.png"):
+        with (
+            patch.object(bridge, "get_worker_host", return_value="remote-host"),
+            patch.object(bridge, "_fetch_remote_file", return_value="/tmp/local-a.png"),
+        ):
             result = bridge._localize_media("lee", media)
         assert result[0][0] == "/tmp/local-a.png"
         assert result[0][1] == "photo"
 
     def test_localize_media_fetch_failure_marks_as_failed(self):
         import bridge
+
         media = [("/remote/missing.png", "photo")]
-        with patch.object(bridge, "get_worker_host", return_value="remote-host"), \
-             patch.object(bridge, "_fetch_remote_file", return_value=None), \
-             patch("os.path.isfile", return_value=False):
+        with (
+            patch.object(bridge, "get_worker_host", return_value="remote-host"),
+            patch.object(bridge, "_fetch_remote_file", return_value=None),
+            patch("os.path.isfile", return_value=False),
+        ):
             result = bridge._localize_media("lee", media)
         assert result[0][0] is None
         assert "Fetch failed" in result[0][1]
@@ -236,10 +282,13 @@ class TestRemoteFileLocalization:
     def test_localize_media_falls_back_to_local_file(self):
         """When rsync fails but the file exists locally on the bridge, use local path."""
         import bridge
+
         media = [("/tmp/report.html", "report")]
-        with patch.object(bridge, "get_worker_host", return_value="remote-host"), \
-             patch.object(bridge, "_fetch_remote_file", return_value=None), \
-             patch("os.path.isfile", return_value=True):
+        with (
+            patch.object(bridge, "get_worker_host", return_value="remote-host"),
+            patch.object(bridge, "_fetch_remote_file", return_value=None),
+            patch("os.path.isfile", return_value=True),
+        ):
             result = bridge._localize_media("worker-x", media)
         assert result[0][0] == "/tmp/report.html"
         assert result[0][1] == "report"
@@ -251,28 +300,39 @@ class TestRemoteFileLocalization:
 class TestReplyMediaExtraction:
     def test_extract_reply_photo(self):
         import bridge
+
         router, sent = _make_router()
         reply_msg = {
             "photo": [{"file_id": "photo123", "file_size": 1000}],
         }
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg"):
+        with patch.object(
+            bridge,
+            "download_telegram_file",
+            return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg",
+        ):
             result = router._extract_reply_media(reply_msg, "lee")
         assert result is not None
         assert "/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg" in result
 
     def test_extract_reply_document(self):
         import bridge
+
         router, sent = _make_router()
         reply_msg = {
             "document": {"file_id": "doc456", "file_name": "report.pdf"},
         }
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-report.pdf"):
+        with patch.object(
+            bridge,
+            "download_telegram_file",
+            return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-report.pdf",
+        ):
             result = router._extract_reply_media(reply_msg, "lee")
         assert result is not None
         assert "/tmp/claudecode-telegram/test/testworker/inbox/test-report.pdf" in result
 
     def test_extract_reply_no_media_returns_none(self):
         import bridge
+
         router, sent = _make_router()
         reply_msg = {"text": "just text, no media"}
         result = router._extract_reply_media(reply_msg, "lee")
@@ -280,11 +340,16 @@ class TestReplyMediaExtraction:
 
     def test_extract_reply_animation(self):
         import bridge
+
         router, sent = _make_router()
         reply_msg = {
             "animation": {"file_id": "anim789"},
         }
-        with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-anim.gif"):
+        with patch.object(
+            bridge,
+            "download_telegram_file",
+            return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-anim.gif",
+        ):
             result = router._extract_reply_media(reply_msg, "lee")
         assert result is not None
 
@@ -299,25 +364,36 @@ class TestMediaGroupFlush:
 
     def test_flush_group_routes_to_active_worker(self):
         import bridge
+
         router, sent = _make_router()
         orig_active = bridge.state.active
         try:
             bridge.state.active = "testworker"
-            router.workers.get_registered_sessions = MagicMock(return_value={"testworker": {"tmux": "claude-test-testworker"}})
+            router.workers.get_registered_sessions = MagicMock(
+                return_value={"testworker": {"tmux": "claude-test-testworker"}}
+            )
             router.parse_at_mentions = MagicMock(return_value=([], ""))
             with bridge.media_groups.lock:
                 bridge.media_groups.buffer["test-group"] = {
-                    "items": [{
-                        "photo": [{"file_id": "photo1", "file_size": 500}],
-                        "chat": {"id": 12345},
-                        "message_id": 1,
-                    }],
+                    "items": [
+                        {
+                            "photo": [{"file_id": "photo1", "file_size": 500}],
+                            "chat": {"id": 12345},
+                            "message_id": 1,
+                        }
+                    ],
                     "caption": "",
                     "timer": None,
                 }
-            with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg") as mock_dl, \
-                 patch.object(router.workers, "send", return_value=True), \
-                 patch.object(router.workers, "is_online", return_value=True):
+            with (
+                patch.object(
+                    bridge,
+                    "download_telegram_file",
+                    return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg",
+                ) as mock_dl,
+                patch.object(router.workers, "send", return_value=True),
+                patch.object(router.workers, "is_online", return_value=True),
+            ):
                 router._handle_media_group_flush("test-group")
             mock_dl.assert_called()
         finally:
@@ -330,6 +406,7 @@ class TestMediaGroupFlush:
 class TestSingleMediaHandling:
     def _make_incoming(self, **overrides):
         import bridge
+
         defaults = {
             "raw_msg": {"chat": {"id": 12345}, "message_id": 1},
             "text": "",
@@ -353,6 +430,7 @@ class TestSingleMediaHandling:
 
     def test_single_photo_routes_to_active_worker(self):
         import bridge
+
         router, sent = _make_router()
         orig_active = bridge.state.active
         orig_admin = bridge.admin_chat_id
@@ -362,12 +440,22 @@ class TestSingleMediaHandling:
             incoming = self._make_incoming(
                 photo=[{"file_id": "photo1", "file_size": 1000}],
             )
-            with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg"), \
-                 patch.object(router.workers, "send", return_value=True) as mock_send, \
-                 patch.object(router.workers, "get_registered_sessions", return_value={"testworker": {"tmux": "claude-test-testworker"}}), \
-                 patch.object(router.workers, "is_online", return_value=True), \
-                 patch.object(router, "parse_at_mentions", return_value=([], "")), \
-                 patch.object(router, "_resolve_media_target", return_value="testworker"):
+            with (
+                patch.object(
+                    bridge,
+                    "download_telegram_file",
+                    return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-photo.jpg",
+                ),
+                patch.object(router.workers, "send", return_value=True) as mock_send,
+                patch.object(
+                    router.workers,
+                    "get_registered_sessions",
+                    return_value={"testworker": {"tmux": "claude-test-testworker"}},
+                ),
+                patch.object(router.workers, "is_online", return_value=True),
+                patch.object(router, "parse_at_mentions", return_value=([], "")),
+                patch.object(router, "_resolve_media_target", return_value="testworker"),
+            ):
                 result = router._handle_single_media(incoming)
             assert result is True
             assert mock_send.called, "workers.send must be called (not bypassed)"
@@ -377,6 +465,7 @@ class TestSingleMediaHandling:
 
     def test_single_media_no_focus_shows_error(self):
         import bridge
+
         router, sent = _make_router()
         orig_active = bridge.state.active
         orig_admin = bridge.admin_chat_id
@@ -396,6 +485,7 @@ class TestSingleMediaHandling:
 
     def test_single_media_non_admin_rejected(self):
         import bridge
+
         router, sent = _make_router()
         orig_admin = bridge.admin_chat_id
         try:
@@ -411,6 +501,7 @@ class TestSingleMediaHandling:
 
     def test_sticker_routes_as_media(self):
         import bridge
+
         router, sent = _make_router()
         orig_active = bridge.state.active
         orig_admin = bridge.admin_chat_id
@@ -420,12 +511,22 @@ class TestSingleMediaHandling:
             incoming = self._make_incoming(
                 sticker={"file_id": "sticker1"},
             )
-            with patch.object(bridge, "download_telegram_file", return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-sticker.webp"), \
-                 patch.object(router.workers, "send", return_value=True) as mock_send, \
-                 patch.object(router.workers, "get_registered_sessions", return_value={"testworker": {"tmux": "claude-test-testworker"}}), \
-                 patch.object(router.workers, "is_online", return_value=True), \
-                 patch.object(router, "parse_at_mentions", return_value=([], "")), \
-                 patch.object(router, "_resolve_media_target", return_value="testworker"):
+            with (
+                patch.object(
+                    bridge,
+                    "download_telegram_file",
+                    return_value="/tmp/claudecode-telegram/test/testworker/inbox/test-sticker.webp",
+                ),
+                patch.object(router.workers, "send", return_value=True) as mock_send,
+                patch.object(
+                    router.workers,
+                    "get_registered_sessions",
+                    return_value={"testworker": {"tmux": "claude-test-testworker"}},
+                ),
+                patch.object(router.workers, "is_online", return_value=True),
+                patch.object(router, "parse_at_mentions", return_value=([], "")),
+                patch.object(router, "_resolve_media_target", return_value="testworker"),
+            ):
                 result = router._handle_single_media(incoming)
             assert result is True
             assert mock_send.called, "workers.send must be called (not bypassed)"
@@ -435,6 +536,7 @@ class TestSingleMediaHandling:
 
     def test_no_file_id_returns_false(self):
         import bridge
+
         router, sent = _make_router()
         incoming = self._make_incoming()
         result = router._handle_single_media(incoming)
@@ -452,12 +554,15 @@ class TestHandleCommandDispatch:
 
     def test_blocked_command_rejected(self):
         import bridge
+
         router, sent = _make_router()
         if hasattr(bridge, "BLOCKED_COMMANDS") and bridge.BLOCKED_COMMANDS:
             blocked = list(bridge.BLOCKED_COMMANDS)[0]
             result = router.handle_command(f"/{blocked}", 12345, 1)
             if result:
-                assert any("not supported" in str(s["text"]).lower() or "interactive" in str(s["text"]).lower() for s in sent)
+                assert any(
+                    "not supported" in str(s["text"]).lower() or "interactive" in str(s["text"]).lower() for s in sent
+                )
 
     def test_command_strips_bot_suffix(self):
         router, sent = _make_router()

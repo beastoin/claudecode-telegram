@@ -3591,6 +3591,7 @@ def watchdog_loop() -> None:
                 _watchdog_jsonl_staleness_check(registered)
             health.ok("watchdog")
             _health_alert_check()
+            _check_focus_expiry()
         watchdog.stop_event.wait(WATCHDOG_INTERVAL)
 
 
@@ -6187,6 +6188,7 @@ class WorkerManager:
         else:
             self.send(name, welcome)
         state.active = name
+        state.focus_sent_ts = _clock.time()
 
         save_last_active(name)
         _registry_add(name, backend, chat_id)
@@ -9388,12 +9390,8 @@ class CommandRouter:
         if len(targets) == 1 and re.fullmatch(r"\s*@[a-zA-Z0-9-]+\s*", text):
             target = targets[0]
             registered = self.workers.get_registered_sessions()
-            if target in registered:
-                state.active = target
-                save_last_active(target)
-            else:
+            if target not in registered:
                 self.reply(chat_id, f"Can't focus guest {target}.")
-            self._reset_mention_streak()
             return
         if reply_context:
             message = self.format_reply_context(message, reply_context, reply_context_ts)
@@ -9406,22 +9404,6 @@ class CommandRouter:
         warning = _format_offline_warning(statuses)
         if warning:
             self.reply(chat_id, warning)
-        registered = self.workers.get_registered_sessions()
-        now = _clock.time()
-        if len(targets) == 1 and targets[0] in registered:
-            target = targets[0]
-            if _last_mention.target == target and now - _last_mention.ts <= 60:
-                _last_mention.count += 1
-            else:
-                _last_mention.target = target
-                _last_mention.count = 1
-            _last_mention.ts = now
-            if _last_mention.count >= 2 and state.active != target:
-                state.active = target
-                save_last_active(target)
-                self.reply(chat_id, f"Switched to {target} (you mentioned them twice).")
-        else:
-            self._reset_mention_streak()
 
     _mention_re = re.compile(r"(?<![a-zA-Z0-9._+\-])@([a-zA-Z0-9-]+)")
 
@@ -9548,6 +9530,9 @@ class CommandRouter:
         self._restart_all_running: bool = False  # type: ignore[no-redef]
         self._restart_all_abort: threading.Event = threading.Event()
         self._restart_all_thread: threading.Thread | None = None  # type: ignore[no-redef]
+        self._debounce_lock: threading.Lock = threading.Lock()
+        self._debounce_buffer: list[IncomingMessage] = []
+        self._debounce_timer: threading.Timer | None = None
         self._commands: dict[str, CommandFn] = {
             "/hire": lambda arg, cid, mid: self.cmd_hire(arg, cid),  # type: ignore[attr-defined]
             "/focus": lambda arg, cid, mid: self.cmd_focus(arg, cid),  # type: ignore[attr-defined]
@@ -9709,7 +9694,6 @@ class CommandRouter:
         global admin_chat_id
         text = incoming.text
         chat_id = incoming.chat_id
-        msg_id = incoming.msg_id
         msg = incoming.raw_msg
         if admin_chat_id is None:
             admin_chat_id = chat_id
@@ -9733,15 +9717,48 @@ class CommandRouter:
                 reply_to.get("date"),
                 (reply_to.get("reply_to_message") or {}).get("message_id"),
             )
-        if msg_id:
-            _record_message(msg_id, text, "manager", msg.get("date"), reply_to_msg_id)
-        if text.startswith("/") and self.handle_command(text, chat_id, msg_id):
-            _last_mention.target = None
-            _last_mention.count = 0
+        if incoming.msg_id:
+            _record_message(incoming.msg_id, text, "manager", msg.get("date"), reply_to_msg_id)
+        if text.startswith("/") and self.handle_command(text, chat_id, incoming.msg_id):
+            self._flush_text_debounce()
             return
+        with self._debounce_lock:
+            self._debounce_buffer.append(incoming)
+            if self._debounce_timer is not None:
+                self._debounce_timer.cancel()
+            t = threading.Timer(_TEXT_DEBOUNCE_WAIT, self._flush_text_debounce)
+            t.daemon = True
+            t.name = "text-debounce"
+            t.start()
+            self._debounce_timer = t
+
+    def _flush_text_debounce(self) -> None:
+        with self._debounce_lock:
+            buf = list(self._debounce_buffer)
+            self._debounce_buffer.clear()
+            if self._debounce_timer is not None:
+                self._debounce_timer.cancel()
+                self._debounce_timer = None
+        if not buf:
+            return
+        first = buf[0]
+        combined_text = "\n".join(m.text for m in buf if m.text)
+        chat_id = first.chat_id
+        msg_id = first.msg_id
+        msg = first.raw_msg
+        reply_to = msg.get("reply_to_message")
+        self._route_combined_message(combined_text, chat_id, msg_id, msg, reply_to)
+
+    def _route_combined_message(
+        self,
+        text: str,
+        chat_id: ChatId | None,
+        msg_id: int | None,
+        msg: TelegramMessageDict,
+        reply_to: TelegramMessageDict | None,
+    ) -> None:
         if re.match(r"^\s*@all(?:\s|[:,]|$)", text, re.IGNORECASE):
             self.route_to_all(text, chat_id, msg_id)
-            self._reset_mention_streak()
             return
         reply_context = ""
         reply_context_ts = None
@@ -9750,7 +9767,6 @@ class CommandRouter:
         unknown_mentions = self.unknown_at_mentions(text)
         if unknown_mentions:
             self.reply(chat_id, self.format_unknown_mentions_warning(unknown_mentions))
-            self._reset_mention_streak()
             return
         targets, message = self.parse_at_mentions(text)
         if targets:
@@ -9764,9 +9780,7 @@ class CommandRouter:
             if reply_context:
                 routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
             self.route_message(reply_worker, routed_text, chat_id, msg_id, one_off=True)
-            self._reset_mention_streak()
             return
-        self._reset_mention_streak()
         routed_text = text
         if reply_context:
             routed_text = self.format_reply_context(text, reply_context, reply_context_ts)
@@ -9787,14 +9801,9 @@ class CommandRouter:
         worker_name = cmd[1:]
         registered = self.workers.get_registered_sessions()
         if worker_name in registered:
-            prev_focus = state.active
-            state.active = worker_name
-            save_last_active(worker_name)
             if not arg:
                 return True
-            if prev_focus != worker_name and self.transport and chat_id is not None:
-                self.transport.send_text(chat_id, f"Now talking to {worker_name.capitalize()}.")
-            self.route_message(worker_name, arg, chat_id, msg_id, one_off=False)
+            self.route_message(worker_name, arg, chat_id, msg_id, one_off=True)
             return True
         return False
 
@@ -9808,6 +9817,7 @@ class CommandRouter:
             else:
                 self.reply(chat_id, "No team members yet. Add someone with /hire <name>.")
                 return
+        state.focus_sent_ts = _clock.time()
         self.route_message(state.active, text, chat_id, msg_id, one_off=False)
 
     def route_to_all(self, text: str, chat_id: ChatId | None, msg_id: int | None) -> None:
@@ -11031,20 +11041,45 @@ class BridgeRuntimeState:
         self.active: str | None = None
         self.startup_notified: bool = False
         self.mention: MentionTracker = MentionTracker()
+        self.focus_sent_ts: float = 0.0
 
     def snapshot(self) -> _StateSnapshot:
         return _StateSnapshot(
             active=self.active,
             startup_notified=self.startup_notified,
+            focus_sent_ts=self.focus_sent_ts,
         )
 
     def restore(self, snap: _StateSnapshot) -> None:
         self.active = snap.active
         self.startup_notified = snap.startup_notified
+        self.focus_sent_ts = snap.focus_sent_ts
 
 
 state = BridgeRuntimeState()
 _last_mention = state.mention
+
+_FOCUS_EXPIRY_SECS: float = 1800.0  # 30 minutes
+_TEXT_DEBOUNCE_WAIT: float = 1.0  # seconds to buffer before routing
+
+
+def _check_focus_expiry() -> bool:
+    if not state.active or state.focus_sent_ts <= 0:
+        return False
+    if _clock.time() - state.focus_sent_ts > _FOCUS_EXPIRY_SECS:
+        name = state.active
+        state.active = None
+        state.focus_sent_ts = 0.0
+        save_last_active("")
+        with suppress(Exception):
+            if admin_chat_id:
+                send_telegram_message(
+                    admin_chat_id, f"Focus on {name} expired (30min idle). Use /focus to pick someone."
+                )
+        return True
+    return False
+
+
 ENDPOINT_REGISTRY: dict[str, dict[str, object]] = {
     "GET /": {
         "description": "API index — lists all endpoints, or rich schemas with ?describe",
@@ -11623,6 +11658,7 @@ def switch_session(name: str) -> tuple[bool, str | None]:
     if name not in registered:
         return False, f"Worker '{name}' not found"
     state.active = name
+    state.focus_sent_ts = _clock.time()
     save_last_active(name)
     return True, None
 
@@ -11703,6 +11739,8 @@ def graceful_shutdown(signum: int, frame: types.FrameType | None) -> None:
                 with suppress(RuntimeError, OSError):
                     t.cancel()
         media_groups.buffer.clear()
+    with suppress(RuntimeError, OSError):
+        command_router._flush_text_debounce()
     with processes.adapter_pids_lock:
         adapter_names = list(processes.adapter_pids.keys())
     for name in adapter_names:

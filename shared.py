@@ -459,6 +459,7 @@ class _MentionSnapshot(NamedTuple):
 class _StateSnapshot(NamedTuple):
     active: str | None
     startup_notified: bool
+    focus_sent_ts: float = 0.0
 
 
 PostRouteHandler = Callable[..., None]  # type: ignore[explicit-any]  # (handler, body, match) -> None

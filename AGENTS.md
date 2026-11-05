@@ -47,12 +47,13 @@ Every path a message takes through the system. Check here before changing any me
 | Flow | Trigger | Behavior |
 |------|---------|----------|
 | Hire worker | `/hire <name>` | Creates tmux session, registers worker, sets focus |
-| Bare message | Text (no `/` or `@`) | 👀 react, `tmux send-keys` to focused worker |
-| @mention | `@name <msg>` | 👀 react, one-off delivery, focus unchanged |
-| @all broadcast | `@all <msg>` | 👀 react, delivered to all active workers |
-| Implicit `/name` | Bare `<name>` as entire message | Treated as `/focus <name>` if worker exists |
+| Bare message | Text (no `/` or `@`) | Debounced 1s, routed to focused worker |
+| @mention | `@name <msg>` | One-off delivery, focus unchanged |
+| @all broadcast | `@all <msg>` | Delivered to all active workers |
+| Implicit `/name` | Bare `<name>` as entire message | Ignored (no implicit focus) |
 | Reply-to | Telegram reply to a worker message | Routes to originating worker |
-| Focus switch | `/focus <name>` | Changes active worker |
+| Focus switch | `/focus <name>` | Changes active worker, resets 30min expiry timer |
+| Focus expiry | 30min no message to focused worker | Clears focus, sends Telegram notice |
 | File/image | Telegram attachment | Downloads to temp, path injected into message |
 | Non-admin | Message from unknown chat_id | Silently rejected |
 
