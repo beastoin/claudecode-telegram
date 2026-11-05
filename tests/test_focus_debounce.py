@@ -111,7 +111,7 @@ def _make_router():
 
 
 class TestFocusCommand:
-    """Only /focus should set focus (plus /hire and startup)."""
+    """Only > name should set focus (plus /hire and startup)."""
 
     def test_focus_command_sets_active(self) -> None:
         import bridge
@@ -120,6 +120,32 @@ class TestFocusCommand:
         router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
         bridge.state.active = None
         bridge.cmd_focus(router, "lee", 12345)
+        assert bridge.state.active == "lee"
+
+    def test_angle_bracket_focus_sets_active(self) -> None:
+        """> name sets focus via _route_text_message."""
+        import bridge
+
+        router, _sent = _make_router()
+        router.workers.get_registered_sessions = MagicMock(return_value={"lee": {"tmux": "claude-test-lee"}})
+        bridge.state.active = None
+        bridge.state.startup_notified = True
+        bridge.admin_chat_id = 12345
+        incoming = bridge.IncomingMessage(
+            text="> lee",
+            chat_id=12345,
+            msg_id=1,
+            raw_msg={"chat": {"id": 12345}, "message_id": 1, "text": "> lee"},
+            photo=None,
+            document=None,
+            animation=None,
+            video=None,
+            audio=None,
+            voice=None,
+            sticker=None,
+        )
+        with patch.object(bridge, "_TEXT_DEBOUNCE_WAIT", 999):
+            router._route_text_message(incoming)
         assert bridge.state.active == "lee"
 
     def test_bare_mention_no_focus_change(self) -> None:

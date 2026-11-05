@@ -52,7 +52,7 @@ Every path a message takes through the system. Check here before changing any me
 | @all broadcast | `@all <msg>` | Delivered to all active workers |
 | Implicit `/name` | Bare `<name>` as entire message | Ignored (no implicit focus) |
 | Reply-to | Telegram reply to a worker message | Routes to originating worker |
-| Focus switch | `/focus <name>` | Changes active worker, resets 30min expiry timer |
+| Focus switch | `> <name>` | Changes active worker, resets 30min expiry timer |
 | Focus expiry | 30min no message to focused worker | Clears focus, sends Telegram notice |
 | File/image | Telegram attachment | Downloads to temp, path injected into message |
 | Non-admin | Message from unknown chat_id | Silently rejected |

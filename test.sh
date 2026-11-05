@@ -976,7 +976,7 @@ test_reply_routing_and_context() {
     # Create another worker for context test
     send_message "/hire contextbot" >/dev/null
     wait_for_session "contextbot"
-    send_message "/focus contextbot" >/dev/null
+    send_message ">contextbot" >/dev/null
 
     # Reply to own message (non-bot) includes context
     result=$(send_reply "." "my original message" "false")
@@ -1028,7 +1028,7 @@ test_shortcuts_and_unknown_commands() {
     fi
 
     # Unknown command passthrough (focused worker exists)
-    send_message "/focus shortcut1" >/dev/null
+    send_message ">shortcut1" >/dev/null
     result=$(send_message "/unknowncmd hello")
     if [[ "$result" == "OK" ]]; then
         success "Unknown command passed through to worker"
@@ -2298,7 +2298,7 @@ test_direct_mode_lifecycle() {
     fi
 
     # Focus and send message
-    send_direct_mode_message "/focus directworker1" >/dev/null
+    send_direct_mode_message ">directworker1" >/dev/null
     sleep 0.2
     result=$(send_direct_mode_message "Hello direct worker!")
     if [[ "$result" == "OK" ]]; then
@@ -2344,7 +2344,7 @@ test_direct_mode_shortcuts() {
     }
 
     # Focus worker1 first
-    send_direct_mode_message "/focus shortcut1" >/dev/null
+    send_direct_mode_message ">shortcut1" >/dev/null
     sleep 0.2
 
     # /<workername> shortcut to focus worker2
@@ -2360,7 +2360,7 @@ test_direct_mode_shortcuts() {
     wait_for_direct_worker "shortmsg1" || true
     send_direct_mode_message "/hire shortmsg2" >/dev/null
     wait_for_direct_worker "shortmsg2" || true
-    send_direct_mode_message "/focus shortmsg1" >/dev/null
+    send_direct_mode_message ">shortmsg1" >/dev/null
     sleep 0.2
 
     local log_lines_before
@@ -2559,7 +2559,7 @@ test_tmux_mode_message_delivery() {
     local tmux_name="${TEST_TMUX_PREFIX}tmuxmsg"
 
     # Focus the worker
-    send_message "/focus tmuxmsg" >/dev/null
+    send_message ">tmuxmsg" >/dev/null
     sleep 0.5
 
     # KEY BEHAVIOR TEST: Send a unique message and verify it appears in tmux pane
@@ -2757,7 +2757,7 @@ test_document_message_routing() {
     # Create and focus a worker
     send_message "/hire doctest" >/dev/null
     wait_for_session "doctest"
-    send_message "/focus doctest" >/dev/null
+    send_message ">doctest" >/dev/null
     sleep 0.3
 
     # Send a document message
@@ -2792,7 +2792,7 @@ test_incoming_document_e2e() {
     # Create worker to receive document
     send_message "/hire docrecv" >/dev/null
     wait_for_session "docrecv"
-    send_message "/focus docrecv" >/dev/null
+    send_message ">docrecv" >/dev/null
     sleep 0.3
 
     # Create a test text file
@@ -2870,7 +2870,7 @@ test_incoming_image_e2e() {
     # Create worker to receive image
     send_message "/hire imgrecv" >/dev/null
     wait_for_session "imgrecv"
-    send_message "/focus imgrecv" >/dev/null
+    send_message ">imgrecv" >/dev/null
     sleep 0.3
 
     # Create a test image
@@ -2944,7 +2944,7 @@ test_inbox_directory() {
     # Create worker
     send_message "/hire inboxtest" >/dev/null
     wait_for_session "inboxtest"
-    send_message "/focus inboxtest" >/dev/null
+    send_message ">inboxtest" >/dev/null
 
     if "$PYTHON" -c "
 from bridge import ensure_inbox_dir, get_inbox_dir
@@ -3100,7 +3100,7 @@ test_last_active_persistence() {
     # Test switch also updates the file
     send_message "/hire testpersist2"
     wait_for_session "testpersist2"
-    send_message "/focus testpersist"
+    send_message ">testpersist"
     sleep 0.2
 
     saved_active=$(cat "$last_active_file")
@@ -17717,7 +17717,7 @@ test_direct_mode_unknown_cmd_passthrough() {
         fail "Cmd passthrough: cmdworker not started"
         return
     }
-    send_direct_mode_message "/focus cmdworker" >/dev/null
+    send_direct_mode_message ">cmdworker" >/dev/null
     sleep 0.2
 
     # Clear log markers
@@ -17928,7 +17928,7 @@ test_direct_mode_worker_accepts_messages() {
     fi
 
     # Focus the worker
-    send_direct_mode_message "/focus msgworker" >/dev/null
+    send_direct_mode_message ">msgworker" >/dev/null
     sleep 0.5
 
     # KEY BEHAVIOR TEST: Send a message and verify it reaches the worker
@@ -17982,7 +17982,7 @@ test_direct_mode_e2e_full_flow() {
     success "E2E: Worker created"
 
     # Step 2: Focus the worker
-    send_direct_mode_message "/focus e2eworker" >/dev/null
+    send_direct_mode_message ">e2eworker" >/dev/null
     sleep 0.3
 
     # Step 3: Send a message and wait for response
@@ -18039,10 +18039,10 @@ test_direct_mode_e2e_focus_switch() {
 
     # Focus first worker
     local result
-    result=$(send_direct_mode_message "/focus focusworker1")
+    result=$(send_direct_mode_message ">focusworker1")
 
     if [[ "$result" != "OK" ]]; then
-        fail "Focus switch: /focus focusworker1 failed"
+        fail "Focus switch: > focusworker1 failed"
         send_direct_mode_message "/end focusworker1" >/dev/null 2>&1 || true
         send_direct_mode_message "/end focusworker2" >/dev/null 2>&1 || true
         return
@@ -18050,10 +18050,10 @@ test_direct_mode_e2e_focus_switch() {
     success "Focus switch: Focused focusworker1"
 
     # Switch focus to second worker
-    result=$(send_direct_mode_message "/focus focusworker2")
+    result=$(send_direct_mode_message ">focusworker2")
 
     if [[ "$result" != "OK" ]]; then
-        fail "Focus switch: /focus focusworker2 failed"
+        fail "Focus switch: > focusworker2 failed"
         send_direct_mode_message "/end focusworker1" >/dev/null 2>&1 || true
         send_direct_mode_message "/end focusworker2" >/dev/null 2>&1 || true
         return
@@ -18094,7 +18094,7 @@ test_direct_mode_e2e_at_mention() {
     wait_for_direct_worker "mentionworker2"
 
     # Focus worker1
-    send_direct_mode_message "/focus mentionworker1" >/dev/null
+    send_direct_mode_message ">mentionworker1" >/dev/null
     sleep 0.2
 
     # Use @mention to route to worker2 without changing focus
@@ -18276,7 +18276,7 @@ test_direct_mode_reply_context() {
         fail "Context direct: contextworker not started"
         return
     fi
-    send_direct_mode_message "/focus contextworker" >/dev/null
+    send_direct_mode_message ">contextworker" >/dev/null
     sleep 0.2
 
     # Clear log markers by noting current line count
@@ -18323,7 +18323,7 @@ test_direct_mode_e2e_restart() {
 
     send_direct_mode_message "/hire restartworker" >/dev/null
     wait_for_direct_worker "restartworker"
-    send_direct_mode_message "/focus restartworker" >/dev/null
+    send_direct_mode_message ">restartworker" >/dev/null
     sleep 0.2
 
     # Get first PID (logged when worker starts)
@@ -18489,7 +18489,7 @@ test_direct_mode_image_handling() {
         return
     fi
 
-    send_direct_mode_message "/focus $worker" >/dev/null
+    send_direct_mode_message ">$worker" >/dev/null
     sleep 0.3
 
     local log_lines_before
@@ -22528,7 +22528,7 @@ test_chaos_message_to_dead_session_errors_gracefully() {
     sleep 0.3
 
     # Focus on it
-    send_message "/focus chaosbot" >/dev/null 2>&1 || true
+    send_message ">chaosbot" >/dev/null 2>&1 || true
     sleep 0.1
 
     # Kill the tmux session (but leave the worker registered)

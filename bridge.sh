@@ -545,7 +545,7 @@ cmd_run() {
     log ""
     log "$(bold "Ready!") Send /hire <name> to your bot to create a Claude instance"
     log ""
-    log "$(bold "Commands:") /hire /focus /team /restart /end"
+    log "$(bold "Commands:") /hire > <name> /team /restart /end"
     log "$(dim "Ctrl+C to stop")"
     log ""
 

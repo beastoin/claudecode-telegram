@@ -6732,7 +6732,7 @@ def cmd_status(router: CommandRouter, chat_id: int) -> bool:
 
 def cmd_focus(router: CommandRouter, name: str, chat_id: int) -> bool:
     if not name:
-        router.reply(chat_id, "Usage: /focus <name>", outcome="Needs decision")
+        router.reply(chat_id, "Usage: > <name>", outcome="Needs decision")
         return True
     name = name.lower().strip()
 
@@ -9535,7 +9535,6 @@ class CommandRouter:
         self._debounce_timer: threading.Timer | None = None
         self._commands: dict[str, CommandFn] = {
             "/hire": lambda arg, cid, mid: self.cmd_hire(arg, cid),  # type: ignore[attr-defined]
-            "/focus": lambda arg, cid, mid: self.cmd_focus(arg, cid),  # type: ignore[attr-defined]
             "/team": lambda arg, cid, mid: self.cmd_team(cid),  # type: ignore[attr-defined]
             "/end": lambda arg, cid, mid: self.cmd_end(arg, cid),  # type: ignore[attr-defined]
             "/restart": lambda arg, cid, mid: self.cmd_restart(cid, arg),  # type: ignore[attr-defined]
@@ -9646,7 +9645,7 @@ class CommandRouter:
         if not self._check_admin(chat_id):
             return True
         if not state.active and not self.parse_at_mentions(text)[0]:
-            self.reply(chat_id, "No focused worker. Use /focus <name> or @worker in caption.")
+            self.reply(chat_id, "No focused worker. Use > <name> or @worker in caption.")
             return True
         download_target = self._resolve_media_target(text, msg)
         local_path = download_telegram_file(file_id, download_target)
@@ -9721,6 +9720,16 @@ class CommandRouter:
             _record_message(incoming.msg_id, text, "manager", msg.get("date"), reply_to_msg_id)
         if text.startswith("/") and self.handle_command(text, chat_id, incoming.msg_id):
             self._flush_text_debounce()
+            return
+        focus_match = re.match(r"^>\s*(\S+)\s*$", text)
+        if focus_match:
+            self._flush_text_debounce()
+            name = focus_match.group(1).lower()
+            ok, err = switch_session(name)
+            if ok:
+                self.reply(chat_id, f"Now talking to {name.capitalize()}.")
+            else:
+                self.reply(chat_id, f'Could not focus "{name}". {err}', outcome="Needs decision")
             return
         with self._debounce_lock:
             self._debounce_buffer.append(incoming)
@@ -11074,7 +11083,7 @@ def _check_focus_expiry() -> bool:
         with suppress(Exception):
             if admin_chat_id:
                 send_telegram_message(
-                    admin_chat_id, f"Focus on {name} expired (30min idle). Use /focus to pick someone."
+                    admin_chat_id, f"Focus on {name} expired (30min idle). Use > <name> to pick someone."
                 )
         return True
     return False
