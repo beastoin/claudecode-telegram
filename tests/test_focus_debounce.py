@@ -132,7 +132,7 @@ class TestFocusCommand:
         result = router.handle_command("/lee", 12345, 1)
         assert result is True
         assert bridge.state.active == "lee"
-        assert any("Now talking to" in m["text"] for m in sent)
+        assert len(sent) == 0  # silent on success
 
     def test_bare_mention_no_focus_change(self) -> None:
         """@worker (no text) should NOT change focus."""
@@ -208,7 +208,7 @@ class TestFocusCommand:
         result = router.handle_command("/lee", 12345, 1)
         assert result is True
         assert bridge.state.active == "lee"
-        assert any("Now talking to" in m["text"] for m in sent)
+        assert len(sent) == 0  # silent on success
 
     def test_hire_still_sets_focus(self) -> None:
         """Hiring a new worker should still set focus to them."""

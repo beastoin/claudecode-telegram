@@ -6737,9 +6737,7 @@ def cmd_focus(router: CommandRouter, name: str, chat_id: int) -> bool:
     name = name.lower().strip()
 
     ok, err = switch_session(name)
-    if ok:
-        router.reply(chat_id, f"Now talking to {name.capitalize()}.")
-    else:
+    if not ok:
         router.reply(chat_id, f'Could not focus "{name}". {err}', outcome="Needs decision")
     return True
 
@@ -9802,9 +9800,7 @@ class CommandRouter:
         if worker_name in registered:
             if not arg:
                 ok, err = switch_session(worker_name)
-                if ok:
-                    self.reply(chat_id, f"Now talking to {worker_name.capitalize()}.")
-                else:
+                if not ok:
                     self.reply(chat_id, f'Could not focus "{worker_name}". {err}', outcome="Needs decision")
                 return True
             self.route_message(worker_name, arg, chat_id, msg_id, one_off=True)
