@@ -5900,8 +5900,6 @@ class WorkerManager:
                         registered[name][key] = info.get(key)  # type: ignore[literal-required]
         if state.active and state.active not in registered:
             state.active = None
-        if registered and not state.active:
-            state.active = next(iter(registered.keys()))
         with self._sessions_cache_lock:
             self._sessions_cache = dict(registered)
             self._sessions_cache_ts = self._clock.time()
