@@ -304,14 +304,16 @@ class TestFocusExpiry:
         router.route_to_active("hello", 12345, 1)
         assert bridge.state.focus_sent_ts == 10600.0
 
-    def test_mention_does_not_reset_focus_timer(self) -> None:
-        """@mentioning another worker doesn't reset focus timer."""
+    def test_any_message_resets_focus_timer(self) -> None:
+        """Any incoming message (even @mention to another worker) resets focus timer."""
         import bridge
 
         clock = _FakeClock(10000.0)
         bridge._clock = clock
         bridge.state.active = "lee"
         bridge.state.focus_sent_ts = clock.time()
+        bridge.state.startup_notified = True
+        bridge.admin_chat_id = 12345
         router, _sent = _make_router()
         router.workers.get_registered_sessions = MagicMock(
             return_value={
@@ -319,19 +321,25 @@ class TestFocusExpiry:
                 "geni": {"tmux": "claude-test-geni"},
             }
         )
-        router._route_mention = MagicMock(return_value={"name": "geni", "status": "sent"})
+        router.workers.is_online = MagicMock(return_value=True)
+        router.workers.send = MagicMock(return_value=True)
         clock.advance(600)
-        router._handle_mention_routing(
-            targets=["geni"],
-            message="check this",
+        incoming = bridge.IncomingMessage(
             text="@geni check this",
             chat_id=12345,
             msg_id=1,
-            reply_to=None,
-            reply_context="",
-            reply_context_ts=None,
+            raw_msg={"chat": {"id": 12345}, "message_id": 1, "text": "@geni check this"},
+            photo=None,
+            document=None,
+            animation=None,
+            video=None,
+            audio=None,
+            voice=None,
+            sticker=None,
         )
-        assert bridge.state.focus_sent_ts == 10000.0
+        with patch.object(bridge, "_TEXT_DEBOUNCE_WAIT", 999):
+            router._route_text_message(incoming)
+        assert bridge.state.focus_sent_ts == 10600.0
 
     def test_no_expiry_when_no_focus(self) -> None:
         import bridge

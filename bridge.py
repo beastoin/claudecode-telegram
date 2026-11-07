@@ -9714,6 +9714,8 @@ class CommandRouter:
             )
         if incoming.msg_id:
             _record_message(incoming.msg_id, text, "manager", msg.get("date"), reply_to_msg_id)
+        if state.active and state.focus_sent_ts > 0:
+            state.focus_sent_ts = _clock.time()
         if text.startswith("/") and self.handle_command(text, chat_id, incoming.msg_id):
             self._flush_text_debounce()
             return
