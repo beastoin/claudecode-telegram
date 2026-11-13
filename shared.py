@@ -1043,7 +1043,7 @@ MACHINES_CONFIG_FILE = Path(
     os.environ.get("MACHINES_CONFIG_FILE", Path.home() / ".config" / "claudecode-telegram" / "machines.json")
 )
 TIMEOUT_TMUX_CHECK = 3
-TIMEOUT_TMUX_SEND = 5
+TIMEOUT_TMUX_SEND = 10
 TIMEOUT_REMOTE_CMD = 10
 TIMEOUT_FILE_TRANSFER = 15
 TIMEOUT_GIT_OP = 30

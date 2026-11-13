@@ -1985,7 +1985,7 @@ class GitHubConnector(BaseConnector[GithubComment]):
         if not had_errors:
             self.clear_handler_errors()
             health.ok("github")
-        if not had_errors and fetch_complete:
+        if fetch_complete and not had_errors:
             with self._lock:
                 self._last_poll_time = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         else:
@@ -3052,6 +3052,7 @@ def _format_watchdog_status_pure(
         "OFFLINE": "Offline",
         "EXITED": "Session ended",
         "UNTRACKED_BUSY": "Working",
+        "PAUSED": "Paused",
     }
     if state in _SIMPLE:
         return _SIMPLE[state]
@@ -3853,6 +3854,9 @@ def _watchdog_refine_state(
             reason = f"{reason} streak={streak}/{IDLE_STREAK_STUCK}"
     else:
         watchdog.idle_streak[name] = 0
+    if worker_state in ("OFFLINE", "DEAD") and is_worker_paused(name):
+        worker_state = "PAUSED"
+        reason = "paused by manager"
     if worker_state == "READY" and is_interactive:
         pane_text = _capture_pane_text(tmux_name, lines=30, host=host)
         if pane_text:
@@ -5932,8 +5936,8 @@ class WorkerManager:
                 return True
         return backend.is_online(tmux_name)
 
-    _SEND_MAX_ATTEMPTS = 3
-    _SEND_BACKOFF = (1.0, 3.0)
+    _SEND_MAX_ATTEMPTS = 4
+    _SEND_BACKOFF_BASE = 2.0
 
     def send(
         self, name: str, message: str, chat_id: ChatId | None = None, session: TmuxSessionDict | None = None
@@ -5950,27 +5954,37 @@ class WorkerManager:
         backend_name = normalize_backend(session.get("backend"))
         backend = claudecode.get_backend(backend_name)
         tmux_name = session.get("tmux", f"{self.tmux_prefix}{name}")
-        ok = backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
-        if ok or not backend.is_interactive:
-            return ok
         host = get_worker_host(name)
-        for attempt in range(1, self._SEND_MAX_ATTEMPTS):
-            if not claudecode.tmux_exists(tmux_name, host=host, timeout=TIMEOUT_TMUX_CHECK):
+        for attempt in range(self._SEND_MAX_ATTEMPTS):
+            if attempt > 0:
+                try:
+                    if not claudecode.tmux_exists(tmux_name, host=host, timeout=TIMEOUT_TMUX_CHECK):
+                        _log(
+                            _LOG_WARN,
+                            "delivery",
+                            f"{name}: session dead, skipping retry (attempt {attempt + 1}/{self._SEND_MAX_ATTEMPTS})",
+                        )
+                        break
+                except (subprocess.SubprocessError, OSError):
+                    pass
+                delay = self._SEND_BACKOFF_BASE**attempt
                 _log(
-                    _LOG_WARN,
+                    _LOG_INFO,
                     "delivery",
-                    f"{name}: session dead, skipping retry (attempt {attempt + 1}/{self._SEND_MAX_ATTEMPTS})",
+                    f"{name}: attempt {attempt + 1}/{self._SEND_MAX_ATTEMPTS} after {delay:.0f}s backoff",
                 )
-                break
-            delay = self._SEND_BACKOFF[min(attempt - 1, len(self._SEND_BACKOFF) - 1)]
-            _log(
-                _LOG_INFO, "delivery", f"{name}: attempt {attempt + 1}/{self._SEND_MAX_ATTEMPTS} after {delay}s backoff"
-            )
-            time.sleep(delay)
-            ok = backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
+                time.sleep(delay)
+            try:
+                ok = backend.send(name, tmux_name, message, BRIDGE_URL, self.sessions_dir)
+            except (subprocess.SubprocessError, OSError) as exc:
+                ok = False
+                _log(_LOG_WARN, "delivery", f"{name}: attempt {attempt + 1} exception: {type(exc).__name__}: {exc}")
             if ok:
-                _log(_LOG_INFO, "delivery", f"{name}: delivered on attempt {attempt + 1}")
-                return True
+                if attempt > 0:
+                    _log(_LOG_INFO, "delivery", f"{name}: delivered on attempt {attempt + 1}")
+                return ok
+            if not backend.is_interactive:
+                return False
         _log(_LOG_WARN, "delivery", f"{name}: all {self._SEND_MAX_ATTEMPTS} attempts failed")
         return False
 
@@ -6389,6 +6403,7 @@ class WorkerManager:
     def _finalize_restart(
         self, name: str, tmux_name: str, backend_name: str, backend: Backend, mode: str, *, fresh_session: bool = False
     ) -> tuple[bool, str | None]:
+        unpause_worker(name)
         if mode != "resume":
             _clear_hook_failures(name)
         resume_id, startup_cwd = self._prepare_restart_state(name, mode)
@@ -6525,9 +6540,7 @@ def cmd_rewind(router: CommandRouter, name: str, chat_id: int) -> bool:
         local_tmp = Path(f"/tmp/transcript-{name}-{sid}.jsonl")
         sync_key = f"{name}:{sid}"
         sync_info = _transcript_sync.get(sync_key)
-        if sync_info and sync_info["status"] == "done" and local_tmp.exists():
-            jsonl_path = str(local_tmp)
-        elif sync_info and sync_info["status"] == "syncing":
+        if sync_info and sync_info["status"] == "syncing":
             router.reply(chat_id, f"⏪ Syncing transcript for {name}… try again in a few seconds")
             return True
         else:
@@ -6778,6 +6791,40 @@ def cmd_end(router: CommandRouter, name: str, chat_id: int) -> bool:
         update_bot_commands()
     else:
         router.reply(chat_id, f'Could not remove "{name}". {err}', outcome="Needs decision")
+    return True
+
+
+def cmd_pause(router: CommandRouter, chat_id: int, args: str = "") -> bool:
+    names = [n.lower().strip() for n in (args or "").split() if n.strip()]
+    if not names:
+        if state.active:
+            names = [state.active]
+        else:
+            router.reply(chat_id, "Usage: /pause <name> [name2 ...]")
+            return True
+    registered = router.workers.get_registered_sessions()
+    results: list[str] = []
+    for name in names:
+        if name not in registered:
+            results.append(f"{name}: not found")
+            continue
+        if is_worker_paused(name):
+            results.append(f"{name}: already paused")
+            continue
+        session = registered[name]
+        tmux_name = session.get("tmux", f"{router.workers.tmux_prefix}{name}")
+        host = get_worker_host(name)
+        backend_name = claudecode.get_worker_backend(name, session)  # type: ignore[arg-type]
+        backend = claudecode.get_backend(backend_name)
+        if backend.is_interactive and claudecode.is_claude_running(tmux_name, host=host):
+            router.workers._stop_running_claude(name, tmux_name)
+        elif not backend.is_interactive:
+            kill_adapter(name)
+        clear_pending(name)
+        pause_worker(name)
+        results.append(f"{name}: paused")
+        _log(_LOG_INFO, "cmd_pause", f"{name}: paused (host={host})")
+    router.reply(chat_id, "\n".join(results))
     return True
 
 
@@ -8706,6 +8753,26 @@ def _pending_timestamp(name: str) -> int | None:
         return None
 
 
+def _get_pause_file(name: str) -> Path:
+    return SESSIONS_DIR / name / "paused"
+
+
+def is_worker_paused(name: str) -> bool:
+    return _get_pause_file(name).exists()
+
+
+def pause_worker(name: str) -> None:
+    session_dir = SESSIONS_DIR / name
+    session_dir.mkdir(parents=True, exist_ok=True)
+    _get_pause_file(name).write_text(str(int(_clock.time())))
+
+
+def unpause_worker(name: str) -> None:
+    f = _get_pause_file(name)
+    if f.exists():
+        f.unlink(missing_ok=True)
+
+
 def _wait_for_restart_ready(tmux_name: str, backend_name: str, timeout: float = 45.0, host: str | None = None) -> bool:
     backend = get_backend(backend_name)
     if not backend.is_interactive:
@@ -9534,6 +9601,7 @@ class CommandRouter:
             "/team": lambda arg, cid, mid: self.cmd_team(cid),  # type: ignore[attr-defined]
             "/end": lambda arg, cid, mid: self.cmd_end(arg, cid),  # type: ignore[attr-defined]
             "/restart": lambda arg, cid, mid: self.cmd_restart(cid, arg),  # type: ignore[attr-defined]
+            "/pause": lambda arg, cid, mid: self.cmd_pause(cid, arg),  # type: ignore[attr-defined]
             "/status": lambda arg, cid, mid: self.cmd_status(cid),  # type: ignore[attr-defined]
             "/settings": lambda arg, cid, mid: self.cmd_status(cid),  # type: ignore[attr-defined]
             "/pilot": lambda arg, cid, mid: self.cmd_pilot(arg, cid),  # type: ignore[attr-defined]
@@ -9848,6 +9916,9 @@ class CommandRouter:
             if teleport_state_file.exists():
                 self.reply(chat_id, f"{session_name.capitalize()} is being teleported. Please wait.")
                 return
+            if is_worker_paused(session_name):
+                self.reply(chat_id, f"{session_name.capitalize()} is paused. Use /restart {session_name} to resume.")
+                return
             self.reply(chat_id, f"{session_name.capitalize()} is offline. Try /restart.")
             return
         backend_name = get_worker_backend(session_name, session)
@@ -10065,42 +10136,16 @@ class Handler(BaseHTTPRequestHandler):
         ok, msg = _restart_connector(name)
         self._send_json(200 if ok else 500, {"ok": ok, "name": name, "message": msg})
 
-    def handle_send_endpoint(self, body: bytes = b"") -> None:
-        data = self._parse_body(body)
-        if data is None:
-            return
-        worker = _str_field(data, "worker").strip()
-        message = _str_field(data, "message") or _str_field(data, "text")
-        sender = _str_field(data, "from", "system").strip() or "system"
-        if not worker:
-            self._send_error_json(400, "Missing worker")
-            return
-        if not isinstance(message, str) or not message.strip():
-            self._send_error_json(400, "Missing message")
-            return
-        prefixed = f"{sender}: {message}"
-        delivered = send_to_worker(worker, prefixed)
-        status = 200 if delivered else 404
-        self._send_json(
-            status,
-            {
-                "ok": delivered,
-                "worker": worker,
-                "delivered": delivered,
-                "error": None if delivered else "Worker not found or not reachable",
-            },
-        )
-
     def _validate_response_source(self, data: HookResponseBody, session_name: str) -> str:
         raw = cast(dict[str, object], data)
         messaging_fields = [key for key in ("worker", "to", "target", "message", "from") if key in raw]
         if messaging_fields:
-            return f"POST /outputs is hook-only and cannot address workers. Unexpected messaging fields: {', '.join(messaging_fields)}. Use POST /messages with {{worker, from, message}}."
+            return f"POST /outputs is hook-only and cannot address workers. Unexpected messaging fields: {', '.join(messaging_fields)}. Workers communicate via tmux — see /workers?from=<name> for send commands."
         source = _str_field(data, "source").strip()
         if not source:
-            return "Missing source. POST /outputs is hook-only; worker output must identify its own source. To message another worker, use POST /messages."
+            return "Missing source. POST /outputs is hook-only; worker output must identify its own source."
         if source != session_name:
-            return f"Source/session mismatch: source={source!r}, session={session_name!r}. POST /outputs only accepts a worker's own output. To message another worker, use POST /messages."
+            return f"Source/session mismatch: source={source!r}, session={session_name!r}. POST /outputs only accepts a worker's own output."
         return ""
 
     def handle_hook_response(self, body: bytes = b"") -> None:
@@ -10266,6 +10311,7 @@ _install_delegates(
         "cmd_alert",
         "cmd_hire",
         "cmd_end",
+        "cmd_pause",
         "cmd_restart",
         "cmd_relay",
         "cmd_pilot",
@@ -10505,7 +10551,6 @@ def _setup_endpoint_routes() -> None:
     P, G, D = "POST", "GET", "DELETE"
     r.add(P, "/outputs", lambda h, b, _m: h.handle_hook_response(b))
     r.add(P, "/notifications", lambda h, b, _m: h.handle_notify(b))
-    r.add(P, "/messages", lambda h, b, _m: h.handle_send_endpoint(b))
     # PR review routes (comments, merges) removed — served by review/src/serve.ts
     r.add(P, "/workers", lambda h, b, _m: h.handle_forge_register(b))
     r.add(P, "/guests", lambda h, b, _m: h.handle_guest_register(b))
@@ -11148,23 +11193,6 @@ ENDPOINT_REGISTRY: dict[str, dict[str, object]] = {
             "warned": "int",
         },
         "auth": "none",
-    },
-    "POST /messages": {
-        "description": "Send a prompt to a worker",
-        "tier": "worker",
-        "body": [
-            {"name": "worker", "type": "string", "required": True, "description": "Target worker name"},
-            {
-                "name": "message",
-                "type": "string",
-                "required": True,
-                "description": "Message text (also accepts 'text')",
-            },
-            {"name": "from", "type": "string", "description": "Sender name for attribution"},
-        ],
-        "response": {"ok": "bool", "worker": "string", "delivered": "bool"},
-        "auth": "none",
-        "mutates": True,
     },
     "POST /teleport": {
         "description": "Worker self-teleport: move yourself to another host",

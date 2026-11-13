@@ -815,7 +815,7 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }: 
         user-select: none;
       }
       .toolbar {
-        display: none;
+        display: flex;
         gap: 6px;
         padding: 8px 10px;
         background: var(--panel);
@@ -896,13 +896,10 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }: 
         -webkit-user-select: text;
         user-select: text;
       }
+      #terminal { padding-bottom: 96px; }
+      #mobile-input { display: none; }
       @media (pointer: coarse) {
-        .toolbar { display: flex; }
-        #mobile-input { pointer-events: none; }
-        #terminal { padding-bottom: 56px; }
-      }
-      @media (pointer: fine) {
-        #mobile-input { display: none; }
+        #mobile-input { display: block; pointer-events: none; }
       }
     </style>
   </head>
@@ -928,6 +925,7 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }: 
         <button data-seq="first">First</button>
         <button data-seq="last">Last</button>
         <button id="select-btn">Select</button>
+        <button id="login-btn" style="background:#5f3a1a;border-color:#8a5a2a;">Login</button>
       </nav>
     </main>
     <div id="select-overlay" style="display:none">
@@ -1137,6 +1135,63 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }: 
           btn.textContent = 'Failed';
         }
         setTimeout(() => { btn.textContent = 'Copy All'; }, 1500);
+      });
+
+      // Login button — sends /login, captures OAuth URL, opens in new tab
+      const loginBtn = document.getElementById('login-btn');
+      function extractOAuthUrl(text) {
+        const lines = text.split('\\n');
+        let parts = [];
+        let capturing = false;
+        for (const line of lines) {
+          const s = line.trim();
+          if (s.includes('https://claude.com/cai/oauth/authorize')) {
+            capturing = true;
+            parts.push(s);
+          } else if (capturing) {
+            if (s && !s.startsWith('Hold') && !s.startsWith('Paste') && !s.startsWith('Browser') && !s.startsWith('(')) {
+              parts.push(s);
+            } else {
+              break;
+            }
+          }
+        }
+        const url = parts.join('');
+        return url.startsWith('https://') ? url : null;
+      }
+      loginBtn?.addEventListener('click', async (e) => {
+        e.preventDefault();
+        if (readonly) return;
+        loginBtn.textContent = 'Checking...';
+        try {
+          // First check if OAuth URL is already visible
+          let r = await fetch('/api/capture?session=' + encodeURIComponent(sessionName));
+          if (!r.ok) throw new Error('capture failed');
+          let payload = await r.json();
+          let url = extractOAuthUrl(payload.text || '');
+          if (!url) {
+            // No URL yet — send /login and wait
+            if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('not connected');
+            loginBtn.textContent = 'Sending /login...';
+            ws.send('/login\\r');
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            r = await fetch('/api/capture?session=' + encodeURIComponent(sessionName));
+            if (!r.ok) throw new Error('capture failed');
+            payload = await r.json();
+            url = extractOAuthUrl(payload.text || '');
+          }
+          if (url) {
+            loginBtn.textContent = 'Opening...';
+            window.open(url, '_blank');
+            setTimeout(() => { loginBtn.textContent = 'Login'; }, 2000);
+          } else {
+            loginBtn.textContent = 'No URL found';
+            setTimeout(() => { loginBtn.textContent = 'Login'; }, 3000);
+          }
+        } catch {
+          loginBtn.textContent = 'Failed';
+          setTimeout(() => { loginBtn.textContent = 'Login'; }, 2000);
+        }
       });
 
       // Tap terminal to bring up keyboard (touch devices)

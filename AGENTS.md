@@ -87,6 +87,7 @@ Every path a message takes through the system. Check here before changing any me
 | Flow | Trigger | Behavior |
 |------|---------|----------|
 | Team status | `/team` | Scans tmux sessions, health state per worker |
+| Pause worker | `/pause <name>` | Kills Claude process, keeps worker registered. `/restart` resumes |
 | Worker restart | `/restart <name>` | Kills + restarts tmux session |
 | Teleport | `/teleport <name> <host>` | Syncs state, starts on target, stops source |
 | Remote register | `POST /workers` | Registers pre-existing worker session from remote host |

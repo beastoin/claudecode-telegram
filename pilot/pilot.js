@@ -19,13 +19,15 @@ var __toESM = (mod, isNodeMode, target) => {
       return cached;
   }
   target = mod != null ? __create(__getProtoOf(mod)) : {};
-  const to = isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
-  for (let key of __getOwnPropNames(mod))
-    if (!__hasOwnProp.call(to, key))
-      __defProp(to, key, {
-        get: __accessProp.bind(mod, key),
-        enumerable: true
-      });
+  const to = isNodeMode || !mod || !mod.__esModule || !__hasOwnProp.call(mod, "default") ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
+  if (mod && typeof mod === "object" || typeof mod === "function") {
+    for (let key of __getOwnPropNames(mod))
+      if (!__hasOwnProp.call(to, key))
+        __defProp(to, key, {
+          get: __accessProp.bind(mod, key),
+          enumerable: true
+        });
+  }
   if (canCache)
     cache.set(mod, to);
   return to;
@@ -34,13 +36,13 @@ var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, 
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
 // node_modules/@lydell/node-pty/eventEmitter2.js
-var require_eventEmitter2 = __commonJS((exports) => {
+var require_eventEmitter2 = __commonJS(function(exports) {
   Object.defineProperty(exports, "__esModule", { value: true });
   var EventEmitter2 = function() {
-    function EventEmitter22() {
+    function EventEmitter2() {
       this._listeners = [];
     }
-    Object.defineProperty(EventEmitter22.prototype, "event", {
+    Object.defineProperty(EventEmitter2.prototype, "event", {
       get: function() {
         var _this = this;
         if (!this._event) {
@@ -64,7 +66,7 @@ var require_eventEmitter2 = __commonJS((exports) => {
       enumerable: true,
       configurable: true
     });
-    EventEmitter22.prototype.fire = function(data) {
+    EventEmitter2.prototype.fire = function(data) {
       var queue = [];
       for (var i = 0;i < this._listeners.length; i++) {
         queue.push(this._listeners[i]);
@@ -73,13 +75,13 @@ var require_eventEmitter2 = __commonJS((exports) => {
         queue[i].call(undefined, data);
       }
     };
-    return EventEmitter22;
+    return EventEmitter2;
   }();
   exports.EventEmitter2 = EventEmitter2;
 });
 
 // node_modules/@lydell/node-pty/terminal.js
-var require_terminal = __commonJS((exports) => {
+var require_terminal = __commonJS(function(exports) {
   Object.defineProperty(exports, "__esModule", { value: true });
   var events_1 = __require("events");
   var eventEmitter2_1 = require_eventEmitter2();
@@ -88,7 +90,7 @@ var require_terminal = __commonJS((exports) => {
   var FLOW_CONTROL_PAUSE = "\x13";
   var FLOW_CONTROL_RESUME = "\x11";
   var Terminal = function() {
-    function Terminal2(opt) {
+    function Terminal(opt) {
       this._pid = 0;
       this._fd = 0;
       this._cols = 0;
@@ -113,42 +115,42 @@ var require_terminal = __commonJS((exports) => {
       this._checkType("gid", opt.gid ? opt.gid : undefined, "number");
       this._checkType("encoding", opt.encoding ? opt.encoding : undefined, "string");
     }
-    Object.defineProperty(Terminal2.prototype, "onData", {
+    Object.defineProperty(Terminal.prototype, "onData", {
       get: function() {
         return this._onData.event;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(Terminal2.prototype, "onExit", {
+    Object.defineProperty(Terminal.prototype, "onExit", {
       get: function() {
         return this._onExit.event;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(Terminal2.prototype, "pid", {
+    Object.defineProperty(Terminal.prototype, "pid", {
       get: function() {
         return this._pid;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(Terminal2.prototype, "cols", {
+    Object.defineProperty(Terminal.prototype, "cols", {
       get: function() {
         return this._cols;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(Terminal2.prototype, "rows", {
+    Object.defineProperty(Terminal.prototype, "rows", {
       get: function() {
         return this._rows;
       },
       enumerable: true,
       configurable: true
     });
-    Terminal2.prototype.write = function(data) {
+    Terminal.prototype.write = function(data) {
       if (this.handleFlowControl) {
         if (data === this._flowControlPause) {
           this.pause();
@@ -161,7 +163,7 @@ var require_terminal = __commonJS((exports) => {
       }
       this._write(data);
     };
-    Terminal2.prototype._forwardEvents = function() {
+    Terminal.prototype._forwardEvents = function() {
       var _this = this;
       this.on("data", function(e) {
         return _this._onData.fire(e);
@@ -170,7 +172,7 @@ var require_terminal = __commonJS((exports) => {
         return _this._onExit.fire({ exitCode, signal });
       });
     };
-    Terminal2.prototype._checkType = function(name, value, type, allowArray) {
+    Terminal.prototype._checkType = function(name, value, type, allowArray) {
       if (allowArray === undefined) {
         allowArray = false;
       }
@@ -191,19 +193,19 @@ var require_terminal = __commonJS((exports) => {
         throw new Error(name + " must be a " + type + " (not a " + typeof value + ")");
       }
     };
-    Terminal2.prototype.end = function(data) {
+    Terminal.prototype.end = function(data) {
       this._socket.end(data);
     };
-    Terminal2.prototype.pipe = function(dest, options) {
+    Terminal.prototype.pipe = function(dest, options) {
       return this._socket.pipe(dest, options);
     };
-    Terminal2.prototype.pause = function() {
+    Terminal.prototype.pause = function() {
       return this._socket.pause();
     };
-    Terminal2.prototype.resume = function() {
+    Terminal.prototype.resume = function() {
       return this._socket.resume();
     };
-    Terminal2.prototype.setEncoding = function(encoding) {
+    Terminal.prototype.setEncoding = function(encoding) {
       if (this._socket._decoder) {
         delete this._socket._decoder;
       }
@@ -211,17 +213,17 @@ var require_terminal = __commonJS((exports) => {
         this._socket.setEncoding(encoding);
       }
     };
-    Terminal2.prototype.addListener = function(eventName, listener) {
+    Terminal.prototype.addListener = function(eventName, listener) {
       this.on(eventName, listener);
     };
-    Terminal2.prototype.on = function(eventName, listener) {
+    Terminal.prototype.on = function(eventName, listener) {
       if (eventName === "close") {
         this._internalee.on("close", listener);
         return;
       }
       this._socket.on(eventName, listener);
     };
-    Terminal2.prototype.emit = function(eventName) {
+    Terminal.prototype.emit = function(eventName) {
       var args = [];
       for (var _i = 1;_i < arguments.length; _i++) {
         args[_i - 1] = arguments[_i];
@@ -231,26 +233,26 @@ var require_terminal = __commonJS((exports) => {
       }
       return this._socket.emit.apply(this._socket, arguments);
     };
-    Terminal2.prototype.listeners = function(eventName) {
+    Terminal.prototype.listeners = function(eventName) {
       return this._socket.listeners(eventName);
     };
-    Terminal2.prototype.removeListener = function(eventName, listener) {
+    Terminal.prototype.removeListener = function(eventName, listener) {
       this._socket.removeListener(eventName, listener);
     };
-    Terminal2.prototype.removeAllListeners = function(eventName) {
+    Terminal.prototype.removeAllListeners = function(eventName) {
       this._socket.removeAllListeners(eventName);
     };
-    Terminal2.prototype.once = function(eventName, listener) {
+    Terminal.prototype.once = function(eventName, listener) {
       this._socket.once(eventName, listener);
     };
-    Terminal2.prototype._close = function() {
+    Terminal.prototype._close = function() {
       this._socket.readable = false;
       this.write = function() {};
       this.end = function() {};
       this._writable = false;
       this._readable = false;
     };
-    Terminal2.prototype._parseEnv = function(env) {
+    Terminal.prototype._parseEnv = function(env) {
       var keys = Object.keys(env || {});
       var pairs = [];
       for (var i = 0;i < keys.length; i++) {
@@ -261,13 +263,13 @@ var require_terminal = __commonJS((exports) => {
       }
       return pairs;
     };
-    return Terminal2;
+    return Terminal;
   }();
   exports.Terminal = Terminal;
 });
 
 // node_modules/@lydell/node-pty/shared/conout.js
-var require_conout = __commonJS((exports) => {
+var require_conout = __commonJS(function(exports) {
   Object.defineProperty(exports, "__esModule", { value: true });
   function getWorkerPipeName(conoutPipeName) {
     return conoutPipeName + "-worker";
@@ -276,7 +278,7 @@ var require_conout = __commonJS((exports) => {
 });
 
 // node_modules/@lydell/node-pty/windowsConoutConnection.js
-var require_windowsConoutConnection = __commonJS((exports) => {
+var require_windowsConoutConnection = __commonJS(function(exports) {
   var __dirname = "/home/claude/claudecode-telegram/pilot/node_modules/@lydell/node-pty";
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
@@ -388,7 +390,7 @@ var require_windowsConoutConnection = __commonJS((exports) => {
   var eventEmitter2_1 = require_eventEmitter2();
   var FLUSH_DATA_INTERVAL = 1000;
   var ConoutConnection = function() {
-    function ConoutConnection2(_conoutPipeName) {
+    function ConoutConnection(_conoutPipeName) {
       var _this = this;
       this._conoutPipeName = _conoutPipeName;
       this._isDisposed = false;
@@ -406,24 +408,24 @@ var require_windowsConoutConnection = __commonJS((exports) => {
         }
       });
     }
-    Object.defineProperty(ConoutConnection2.prototype, "onReady", {
+    Object.defineProperty(ConoutConnection.prototype, "onReady", {
       get: function() {
         return this._onReady.event;
       },
       enumerable: true,
       configurable: true
     });
-    ConoutConnection2.prototype.dispose = function() {
+    ConoutConnection.prototype.dispose = function() {
       if (this._isDisposed) {
         return;
       }
       this._isDisposed = true;
       this._drainDataAndClose();
     };
-    ConoutConnection2.prototype.connectSocket = function(socket) {
+    ConoutConnection.prototype.connectSocket = function(socket) {
       socket.connect(conout_1.getWorkerPipeName(this._conoutPipeName));
     };
-    ConoutConnection2.prototype._drainDataAndClose = function() {
+    ConoutConnection.prototype._drainDataAndClose = function() {
       var _this = this;
       if (this._drainTimeout) {
         clearTimeout(this._drainTimeout);
@@ -432,7 +434,7 @@ var require_windowsConoutConnection = __commonJS((exports) => {
         return _this._destroySocket();
       }, FLUSH_DATA_INTERVAL);
     };
-    ConoutConnection2.prototype._destroySocket = function() {
+    ConoutConnection.prototype._destroySocket = function() {
       return __awaiter(this, undefined, undefined, function() {
         return __generator(this, function(_a) {
           switch (_a.label) {
@@ -445,13 +447,13 @@ var require_windowsConoutConnection = __commonJS((exports) => {
         });
       });
     };
-    return ConoutConnection2;
+    return ConoutConnection;
   }();
   exports.ConoutConnection = ConoutConnection;
 });
 
 // node_modules/@lydell/node-pty/package.json
-var require_package = __commonJS((exports, module) => {
+var require_package = __commonJS(function(exports, module) {
   module.exports = {
     name: "@lydell/node-pty",
     description: "node-pty with prebuilt binaries",
@@ -486,7 +488,7 @@ var require_package = __commonJS((exports, module) => {
 });
 
 // node_modules/@lydell/node-pty/requireBinary.js
-var require_requireBinary = __commonJS((exports) => {
+var require_requireBinary = __commonJS(function(exports) {
   Object.defineProperty(exports, "__esModule", { value: true });
   var PACKAGE_NAME = "@lydell/node-pty-" + process.platform + "-" + process.arch;
   var help = `
@@ -527,7 +529,7 @@ Your platform (` + process.platform + "-" + process.arch + ") might not be suppo
 });
 
 // node_modules/@lydell/node-pty/windowsPtyAgent.js
-var require_windowsPtyAgent = __commonJS((exports) => {
+var require_windowsPtyAgent = __commonJS(function(exports) {
   var __dirname = "/home/claude/claudecode-telegram/pilot/node_modules/@lydell/node-pty";
   Object.defineProperty(exports, "__esModule", { value: true });
   var fs = __require("fs");
@@ -539,7 +541,7 @@ var require_windowsPtyAgent = __commonJS((exports) => {
   var conptyNative;
   var FLUSH_DATA_INTERVAL = 1000;
   var WindowsPtyAgent = function() {
-    function WindowsPtyAgent2(file, args, env, cwd, cols, rows, debug, conptyInheritCursor) {
+    function WindowsPtyAgent(file, args, env, cwd, cols, rows, debug, conptyInheritCursor) {
       var _this = this;
       if (conptyInheritCursor === undefined) {
         conptyInheritCursor = false;
@@ -576,51 +578,51 @@ var require_windowsPtyAgent = __commonJS((exports) => {
       });
       this._innerPid = connect.pid;
     }
-    Object.defineProperty(WindowsPtyAgent2.prototype, "inSocket", {
+    Object.defineProperty(WindowsPtyAgent.prototype, "inSocket", {
       get: function() {
         return this._inSocket;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(WindowsPtyAgent2.prototype, "outSocket", {
+    Object.defineProperty(WindowsPtyAgent.prototype, "outSocket", {
       get: function() {
         return this._outSocket;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(WindowsPtyAgent2.prototype, "fd", {
+    Object.defineProperty(WindowsPtyAgent.prototype, "fd", {
       get: function() {
         return this._fd;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(WindowsPtyAgent2.prototype, "innerPid", {
+    Object.defineProperty(WindowsPtyAgent.prototype, "innerPid", {
       get: function() {
         return this._innerPid;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(WindowsPtyAgent2.prototype, "pty", {
+    Object.defineProperty(WindowsPtyAgent.prototype, "pty", {
       get: function() {
         return this._pty;
       },
       enumerable: true,
       configurable: true
     });
-    WindowsPtyAgent2.prototype.resize = function(cols, rows) {
+    WindowsPtyAgent.prototype.resize = function(cols, rows) {
       if (this._exitCode !== undefined) {
         throw new Error("Cannot resize a pty that has already exited");
       }
       this._ptyNative.resize(this._pty, cols, rows);
     };
-    WindowsPtyAgent2.prototype.clear = function() {
+    WindowsPtyAgent.prototype.clear = function() {
       this._ptyNative.clear(this._pty);
     };
-    WindowsPtyAgent2.prototype.kill = function() {
+    WindowsPtyAgent.prototype.kill = function() {
       var _this = this;
       this._inSocket.readable = false;
       this._outSocket.readable = false;
@@ -634,7 +636,7 @@ var require_windowsPtyAgent = __commonJS((exports) => {
       });
       this._conoutSocketWorker.dispose();
     };
-    WindowsPtyAgent2.prototype._getConsoleProcessList = function() {
+    WindowsPtyAgent.prototype._getConsoleProcessList = function() {
       var _this = this;
       return new Promise(function(resolve) {
         var agent = child_process_1.fork(path.join(__dirname, "conpty_console_list_agent"), [_this._innerPid.toString()]);
@@ -648,17 +650,17 @@ var require_windowsPtyAgent = __commonJS((exports) => {
         }, 5000);
       });
     };
-    Object.defineProperty(WindowsPtyAgent2.prototype, "exitCode", {
+    Object.defineProperty(WindowsPtyAgent.prototype, "exitCode", {
       get: function() {
         return this._exitCode;
       },
       enumerable: true,
       configurable: true
     });
-    WindowsPtyAgent2.prototype._generatePipeName = function() {
+    WindowsPtyAgent.prototype._generatePipeName = function() {
       return "conpty-" + Math.random() * 1e7;
     };
-    WindowsPtyAgent2.prototype._$onProcessExit = function(exitCode) {
+    WindowsPtyAgent.prototype._$onProcessExit = function(exitCode) {
       var _this = this;
       this._exitCode = exitCode;
       this._flushDataAndCleanUp();
@@ -666,7 +668,7 @@ var require_windowsPtyAgent = __commonJS((exports) => {
         return _this._flushDataAndCleanUp();
       });
     };
-    WindowsPtyAgent2.prototype._flushDataAndCleanUp = function() {
+    WindowsPtyAgent.prototype._flushDataAndCleanUp = function() {
       var _this = this;
       if (this._closeTimeout) {
         clearTimeout(this._closeTimeout);
@@ -675,12 +677,12 @@ var require_windowsPtyAgent = __commonJS((exports) => {
         return _this._cleanUpProcess();
       }, FLUSH_DATA_INTERVAL);
     };
-    WindowsPtyAgent2.prototype._cleanUpProcess = function() {
+    WindowsPtyAgent.prototype._cleanUpProcess = function() {
       this._inSocket.readable = false;
       this._outSocket.readable = false;
       this._outSocket.destroy();
     };
-    return WindowsPtyAgent2;
+    return WindowsPtyAgent;
   }();
   exports.WindowsPtyAgent = WindowsPtyAgent;
   function argsToCommandLine(file, args) {
@@ -745,7 +747,7 @@ var require_windowsPtyAgent = __commonJS((exports) => {
 });
 
 // node_modules/@lydell/node-pty/utils.js
-var require_utils = __commonJS((exports) => {
+var require_utils = __commonJS(function(exports) {
   Object.defineProperty(exports, "__esModule", { value: true });
   function assign(target) {
     var sources = [];
@@ -763,15 +765,15 @@ var require_utils = __commonJS((exports) => {
 });
 
 // node_modules/@lydell/node-pty/windowsTerminal.js
-var require_windowsTerminal = __commonJS((exports) => {
+var require_windowsTerminal = __commonJS(function(exports) {
   var __extends = exports && exports.__extends || function() {
     var extendStatics = function(d, b) {
-      extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
-        d2.__proto__ = b2;
-      } || function(d2, b2) {
-        for (var p in b2)
-          if (b2.hasOwnProperty(p))
-            d2[p] = b2[p];
+      extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d, b) {
+        d.__proto__ = b;
+      } || function(d, b) {
+        for (var p in b)
+          if (b.hasOwnProperty(p))
+            d[p] = b[p];
       };
       return extendStatics(d, b);
     };
@@ -790,8 +792,8 @@ var require_windowsTerminal = __commonJS((exports) => {
   var DEFAULT_FILE = "cmd.exe";
   var DEFAULT_NAME = "Windows Shell";
   var WindowsTerminal = function(_super) {
-    __extends(WindowsTerminal2, _super);
-    function WindowsTerminal2(file, args, opt) {
+    __extends(WindowsTerminal, _super);
+    function WindowsTerminal(file, args, opt) {
       var _this = _super.call(this, opt) || this;
       _this._checkType("args", args, "string", true);
       args = args || [];
@@ -848,16 +850,16 @@ var require_windowsTerminal = __commonJS((exports) => {
       _this._forwardEvents();
       return _this;
     }
-    WindowsTerminal2.prototype._write = function(data) {
+    WindowsTerminal.prototype._write = function(data) {
       this._defer(this._doWrite, data);
     };
-    WindowsTerminal2.prototype._doWrite = function(data) {
+    WindowsTerminal.prototype._doWrite = function(data) {
       this._agent.inSocket.write(data);
     };
-    WindowsTerminal2.open = function(options) {
+    WindowsTerminal.open = function(options) {
       throw new Error("open() not supported on windows, use Fork() instead.");
     };
-    WindowsTerminal2.prototype.resize = function(cols, rows) {
+    WindowsTerminal.prototype.resize = function(cols, rows) {
       var _this = this;
       if (cols <= 0 || rows <= 0 || isNaN(cols) || isNaN(rows) || cols === Infinity || rows === Infinity) {
         throw new Error("resizing must be done using positive cols and rows");
@@ -868,19 +870,19 @@ var require_windowsTerminal = __commonJS((exports) => {
         _this._rows = rows;
       });
     };
-    WindowsTerminal2.prototype.clear = function() {
+    WindowsTerminal.prototype.clear = function() {
       var _this = this;
       this._deferNoArgs(function() {
         _this._agent.clear();
       });
     };
-    WindowsTerminal2.prototype.destroy = function() {
+    WindowsTerminal.prototype.destroy = function() {
       var _this = this;
       this._deferNoArgs(function() {
         _this.kill();
       });
     };
-    WindowsTerminal2.prototype.kill = function(signal) {
+    WindowsTerminal.prototype.kill = function(signal) {
       var _this = this;
       this._deferNoArgs(function() {
         if (signal) {
@@ -890,7 +892,7 @@ var require_windowsTerminal = __commonJS((exports) => {
         _this._agent.kill();
       });
     };
-    WindowsTerminal2.prototype._deferNoArgs = function(deferredFn) {
+    WindowsTerminal.prototype._deferNoArgs = function(deferredFn) {
       var _this = this;
       if (this._isReady) {
         deferredFn.call(this);
@@ -902,7 +904,7 @@ var require_windowsTerminal = __commonJS((exports) => {
         }
       });
     };
-    WindowsTerminal2.prototype._defer = function(deferredFn, arg) {
+    WindowsTerminal.prototype._defer = function(deferredFn, arg) {
       var _this = this;
       if (this._isReady) {
         deferredFn.call(this, arg);
@@ -914,42 +916,42 @@ var require_windowsTerminal = __commonJS((exports) => {
         }
       });
     };
-    Object.defineProperty(WindowsTerminal2.prototype, "process", {
+    Object.defineProperty(WindowsTerminal.prototype, "process", {
       get: function() {
         return this._name;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(WindowsTerminal2.prototype, "master", {
+    Object.defineProperty(WindowsTerminal.prototype, "master", {
       get: function() {
         throw new Error("master is not supported on Windows");
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(WindowsTerminal2.prototype, "slave", {
+    Object.defineProperty(WindowsTerminal.prototype, "slave", {
       get: function() {
         throw new Error("slave is not supported on Windows");
       },
       enumerable: true,
       configurable: true
     });
-    return WindowsTerminal2;
+    return WindowsTerminal;
   }(terminal_1.Terminal);
   exports.WindowsTerminal = WindowsTerminal;
 });
 
 // node_modules/@lydell/node-pty/unixTerminal.js
-var require_unixTerminal = __commonJS((exports) => {
+var require_unixTerminal = __commonJS(function(exports) {
   var __extends = exports && exports.__extends || function() {
     var extendStatics = function(d, b) {
-      extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
-        d2.__proto__ = b2;
-      } || function(d2, b2) {
-        for (var p in b2)
-          if (b2.hasOwnProperty(p))
-            d2[p] = b2[p];
+      extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d, b) {
+        d.__proto__ = b;
+      } || function(d, b) {
+        for (var p in b)
+          if (b.hasOwnProperty(p))
+            d[p] = b[p];
       };
       return extendStatics(d, b);
     };
@@ -975,8 +977,8 @@ var require_unixTerminal = __commonJS((exports) => {
   var DEFAULT_NAME = "xterm";
   var DESTROY_SOCKET_TIMEOUT_MS = 200;
   var UnixTerminal = function(_super) {
-    __extends(UnixTerminal2, _super);
-    function UnixTerminal2(file, args, opt) {
+    __extends(UnixTerminal, _super);
+    function UnixTerminal(file, args, opt) {
       var _a, _b;
       var _this = _super.call(this, opt) || this;
       _this._boundClose = false;
@@ -1065,39 +1067,39 @@ var require_unixTerminal = __commonJS((exports) => {
       _this._forwardEvents();
       return _this;
     }
-    Object.defineProperty(UnixTerminal2.prototype, "master", {
+    Object.defineProperty(UnixTerminal.prototype, "master", {
       get: function() {
         return this._master;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(UnixTerminal2.prototype, "slave", {
+    Object.defineProperty(UnixTerminal.prototype, "slave", {
       get: function() {
         return this._slave;
       },
       enumerable: true,
       configurable: true
     });
-    UnixTerminal2.prototype._write = function(data) {
+    UnixTerminal.prototype._write = function(data) {
       this._socket.write(data);
     };
-    Object.defineProperty(UnixTerminal2.prototype, "fd", {
+    Object.defineProperty(UnixTerminal.prototype, "fd", {
       get: function() {
         return this._fd;
       },
       enumerable: true,
       configurable: true
     });
-    Object.defineProperty(UnixTerminal2.prototype, "ptsName", {
+    Object.defineProperty(UnixTerminal.prototype, "ptsName", {
       get: function() {
         return this._pty;
       },
       enumerable: true,
       configurable: true
     });
-    UnixTerminal2.open = function(opt) {
-      var self = Object.create(UnixTerminal2.prototype);
+    UnixTerminal.open = function(opt) {
+      var self = Object.create(UnixTerminal.prototype);
       opt = opt || {};
       if (arguments.length > 1) {
         opt = {
@@ -1138,7 +1140,7 @@ var require_unixTerminal = __commonJS((exports) => {
       });
       return self;
     };
-    UnixTerminal2.prototype.destroy = function() {
+    UnixTerminal.prototype.destroy = function() {
       var _this = this;
       this._close();
       this._socket.once("close", function() {
@@ -1146,12 +1148,12 @@ var require_unixTerminal = __commonJS((exports) => {
       });
       this._socket.destroy();
     };
-    UnixTerminal2.prototype.kill = function(signal) {
+    UnixTerminal.prototype.kill = function(signal) {
       try {
         process.kill(this.pid, signal || "SIGHUP");
       } catch (e) {}
     };
-    Object.defineProperty(UnixTerminal2.prototype, "process", {
+    Object.defineProperty(UnixTerminal.prototype, "process", {
       get: function() {
         if (process.platform === "darwin") {
           var title = pty.process(this._fd);
@@ -1162,7 +1164,7 @@ var require_unixTerminal = __commonJS((exports) => {
       enumerable: true,
       configurable: true
     });
-    UnixTerminal2.prototype.resize = function(cols, rows) {
+    UnixTerminal.prototype.resize = function(cols, rows) {
       if (cols <= 0 || rows <= 0 || isNaN(cols) || isNaN(rows) || cols === Infinity || rows === Infinity) {
         throw new Error("resizing must be done using positive cols and rows");
       }
@@ -1170,8 +1172,8 @@ var require_unixTerminal = __commonJS((exports) => {
       this._cols = cols;
       this._rows = rows;
     };
-    UnixTerminal2.prototype.clear = function() {};
-    UnixTerminal2.prototype._sanitizeEnv = function(env) {
+    UnixTerminal.prototype.clear = function() {};
+    UnixTerminal.prototype._sanitizeEnv = function(env) {
       delete env["TMUX"];
       delete env["TMUX_PANE"];
       delete env["STY"];
@@ -1181,13 +1183,13 @@ var require_unixTerminal = __commonJS((exports) => {
       delete env["COLUMNS"];
       delete env["LINES"];
     };
-    return UnixTerminal2;
+    return UnixTerminal;
   }(terminal_1.Terminal);
   exports.UnixTerminal = UnixTerminal;
 });
 
 // node_modules/@lydell/node-pty/index.js
-var require_node_pty = __commonJS((exports) => {
+var require_node_pty = __commonJS(function(exports) {
   Object.defineProperty(exports, "__esModule", { value: true });
   var terminalCtor;
   if (process.platform === "win32") {
@@ -1214,7 +1216,7 @@ var require_node_pty = __commonJS((exports) => {
 });
 
 // node_modules/ws/lib/constants.js
-var require_constants = __commonJS((exports, module) => {
+var require_constants = __commonJS(function(exports, module) {
   var BINARY_TYPES = ["nodebuffer", "arraybuffer", "fragments"];
   var hasBlob = typeof Blob !== "undefined";
   if (hasBlob)
@@ -1234,7 +1236,7 @@ var require_constants = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/buffer-util.js
-var require_buffer_util = __commonJS((exports, module) => {
+var require_buffer_util = __commonJS(function(exports, module) {
   var { EMPTY_BUFFER } = require_constants();
   var FastBuffer = Buffer[Symbol.species];
   function concat(list, totalLength) {
@@ -1295,11 +1297,11 @@ var require_buffer_util = __commonJS((exports, module) => {
   if (!process.env.WS_NO_BUFFER_UTIL) {
     try {
       const bufferUtil = (()=>{throw new Error("Cannot require module "+"bufferutil");})();
-      module.exports.mask = function(source, mask, output, offset, length) {
+      module.exports.mask = function(source, mask2, output, offset, length) {
         if (length < 48)
-          _mask(source, mask, output, offset, length);
+          _mask(source, mask2, output, offset, length);
         else
-          bufferUtil.mask(source, mask, output, offset, length);
+          bufferUtil.mask(source, mask2, output, offset, length);
       };
       module.exports.unmask = function(buffer, mask) {
         if (buffer.length < 32)
@@ -1312,7 +1314,7 @@ var require_buffer_util = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/limiter.js
-var require_limiter = __commonJS((exports, module) => {
+var require_limiter = __commonJS(function(exports, module) {
   var kDone = Symbol("kDone");
   var kRun = Symbol("kRun");
 
@@ -1344,7 +1346,7 @@ var require_limiter = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/permessage-deflate.js
-var require_permessage_deflate = __commonJS((exports, module) => {
+var require_permessage_deflate = __commonJS(function(exports, module) {
   var zlib = __require("zlib");
   var bufferUtil = require_buffer_util();
   var Limiter = require_limiter();
@@ -1532,7 +1534,7 @@ var require_permessage_deflate = __commonJS((exports, module) => {
           callback(err);
           return;
         }
-        const data2 = bufferUtil.concat(this._inflate[kBuffers], this._inflate[kTotalLength]);
+        const data = bufferUtil.concat(this._inflate[kBuffers], this._inflate[kTotalLength]);
         if (this._inflate._readableState.endEmitted) {
           this._inflate.close();
           this._inflate = null;
@@ -1543,7 +1545,7 @@ var require_permessage_deflate = __commonJS((exports, module) => {
             this._inflate.reset();
           }
         }
-        callback(null, data2);
+        callback(null, data);
       });
     }
     _compress(data, fin, callback) {
@@ -1565,9 +1567,9 @@ var require_permessage_deflate = __commonJS((exports, module) => {
         if (!this._deflate) {
           return;
         }
-        let data2 = bufferUtil.concat(this._deflate[kBuffers], this._deflate[kTotalLength]);
+        let data = bufferUtil.concat(this._deflate[kBuffers], this._deflate[kTotalLength]);
         if (fin) {
-          data2 = new FastBuffer(data2.buffer, data2.byteOffset, data2.length - 4);
+          data = new FastBuffer(data.buffer, data.byteOffset, data.length - 4);
         }
         this._deflate[kCallback] = null;
         this._deflate[kTotalLength] = 0;
@@ -1575,7 +1577,7 @@ var require_permessage_deflate = __commonJS((exports, module) => {
         if (fin && this.params[`${endpoint}_no_context_takeover`]) {
           this._deflate.reset();
         }
-        callback(null, data2);
+        callback(null, data);
       });
     }
   }
@@ -1608,7 +1610,7 @@ var require_permessage_deflate = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/validation.js
-var require_validation = __commonJS((exports, module) => {
+var require_validation = __commonJS(function(exports, module) {
   var { isUtf8 } = __require("buffer");
   var { hasBlob } = require_constants();
   var tokenChars = [
@@ -1795,7 +1797,7 @@ var require_validation = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/receiver.js
-var require_receiver = __commonJS((exports, module) => {
+var require_receiver = __commonJS(function(exports, module) {
   var { Writable } = __require("stream");
   var PerMessageDeflate = require_permessage_deflate();
   var {
@@ -2176,7 +2178,7 @@ var require_receiver = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/sender.js
-var require_sender = __commonJS((exports, module) => {
+var require_sender = __commonJS(function(exports, module) {
   var { Duplex } = __require("stream");
   var { randomFillSync } = __require("crypto");
   var PerMessageDeflate = require_permessage_deflate();
@@ -2530,7 +2532,7 @@ var require_sender = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/event-target.js
-var require_event_target = __commonJS((exports, module) => {
+var require_event_target = __commonJS(function(exports, module) {
   var { kForOnEventAttribute, kListener } = require_constants();
   var kCode = Symbol("kCode");
   var kData = Symbol("kData");
@@ -2681,7 +2683,7 @@ var require_event_target = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/extension.js
-var require_extension = __commonJS((exports, module) => {
+var require_extension = __commonJS(function(exports, module) {
   var { tokenChars } = require_validation();
   function push(dest, name, elem) {
     if (dest[name] === undefined)
@@ -2846,7 +2848,7 @@ var require_extension = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/websocket.js
-var require_websocket = __commonJS((exports, module) => {
+var require_websocket = __commonJS(function(exports, module) {
   var EventEmitter = __require("events");
   var https = __require("https");
   var http = __require("http");
@@ -3265,7 +3267,7 @@ var require_websocket = __commonJS((exports, module) => {
     }
     const defaultPort = isSecure ? 443 : 80;
     const key = randomBytes(16).toString("base64");
-    const request = isSecure ? https.request : http.request;
+    const request3 = isSecure ? https.request : http.request;
     const protocolSet = new Set;
     let perMessageDeflate;
     opts.createConnection = opts.createConnection || (isSecure ? tlsConnect : netConnect);
@@ -3320,8 +3322,8 @@ var require_websocket = __commonJS((exports, module) => {
         const headers = options && options.headers;
         options = { ...options, headers: {} };
         if (headers) {
-          for (const [key2, value] of Object.entries(headers)) {
-            options.headers[key2.toLowerCase()] = value;
+          for (const [key, value] of Object.entries(headers)) {
+            options.headers[key.toLowerCase()] = value;
           }
         }
       } else if (websocket.listenerCount("redirect") === 0) {
@@ -3337,12 +3339,12 @@ var require_websocket = __commonJS((exports, module) => {
       if (opts.auth && !options.headers.authorization) {
         options.headers.authorization = "Basic " + Buffer.from(opts.auth).toString("base64");
       }
-      req = websocket._req = request(opts);
+      req = websocket._req = request3(opts);
       if (websocket._redirects) {
         websocket.emit("redirect", websocket.url, req);
       }
     } else {
-      req = websocket._req = request(opts);
+      req = websocket._req = request3(opts);
     }
     if (opts.timeout) {
       req.on("timeout", () => {
@@ -3608,7 +3610,7 @@ var require_websocket = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/stream.js
-var require_stream = __commonJS((exports, module) => {
+var require_stream = __commonJS(function(exports, module) {
   var WebSocket = require_websocket();
   var { Duplex } = __require("stream");
   function emitClose(stream) {
@@ -3658,9 +3660,9 @@ var require_stream = __commonJS((exports, module) => {
         return;
       }
       let called = false;
-      ws.once("error", function error(err2) {
+      ws.once("error", function error(err) {
         called = true;
-        callback(err2);
+        callback(err);
       });
       ws.once("close", function close() {
         if (!called)
@@ -3711,7 +3713,7 @@ var require_stream = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/subprotocol.js
-var require_subprotocol = __commonJS((exports, module) => {
+var require_subprotocol = __commonJS(function(exports, module) {
   var { tokenChars } = require_validation();
   function parse(header) {
     const protocols = new Set;
@@ -3732,11 +3734,11 @@ var require_subprotocol = __commonJS((exports, module) => {
         }
         if (end === -1)
           end = i;
-        const protocol2 = header.slice(start, end);
-        if (protocols.has(protocol2)) {
-          throw new SyntaxError(`The "${protocol2}" subprotocol is duplicated`);
+        const protocol = header.slice(start, end);
+        if (protocols.has(protocol)) {
+          throw new SyntaxError(`The "${protocol}" subprotocol is duplicated`);
         }
-        protocols.add(protocol2);
+        protocols.add(protocol);
         start = end = -1;
       } else {
         throw new SyntaxError(`Unexpected character at index ${i}`);
@@ -3756,7 +3758,7 @@ var require_subprotocol = __commonJS((exports, module) => {
 });
 
 // node_modules/ws/lib/websocket-server.js
-var require_websocket_server = __commonJS((exports, module) => {
+var require_websocket_server = __commonJS(function(exports, module) {
   var EventEmitter = __require("events");
   var http = __require("http");
   var { Duplex } = __require("stream");
@@ -4683,7 +4685,7 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }) 
         user-select: none;
       }
       .toolbar {
-        display: none;
+        display: flex;
         gap: 6px;
         padding: 8px 10px;
         background: var(--panel);
@@ -4764,13 +4766,10 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }) 
         -webkit-user-select: text;
         user-select: text;
       }
+      #terminal { padding-bottom: 96px; }
+      #mobile-input { display: none; }
       @media (pointer: coarse) {
-        .toolbar { display: flex; }
-        #mobile-input { pointer-events: none; }
-        #terminal { padding-bottom: 56px; }
-      }
-      @media (pointer: fine) {
-        #mobile-input { display: none; }
+        #mobile-input { display: block; pointer-events: none; }
       }
     </style>
   </head>
@@ -4796,6 +4795,7 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }) 
         <button data-seq="first">First</button>
         <button data-seq="last">Last</button>
         <button id="select-btn">Select</button>
+        <button id="login-btn" style="background:#5f3a1a;border-color:#8a5a2a;">Login</button>
       </nav>
     </main>
     <div id="select-overlay" style="display:none">
@@ -5005,6 +5005,63 @@ function renderSessionPage({ sessionName, token, readonly, embed, hideheader }) 
           btn.textContent = 'Failed';
         }
         setTimeout(() => { btn.textContent = 'Copy All'; }, 1500);
+      });
+
+      // Login button — sends /login, captures OAuth URL, opens in new tab
+      const loginBtn = document.getElementById('login-btn');
+      function extractOAuthUrl(text) {
+        const lines = text.split('\\n');
+        let parts = [];
+        let capturing = false;
+        for (const line of lines) {
+          const s = line.trim();
+          if (s.includes('https://claude.com/cai/oauth/authorize')) {
+            capturing = true;
+            parts.push(s);
+          } else if (capturing) {
+            if (s && !s.startsWith('Hold') && !s.startsWith('Paste') && !s.startsWith('Browser') && !s.startsWith('(')) {
+              parts.push(s);
+            } else {
+              break;
+            }
+          }
+        }
+        const url = parts.join('');
+        return url.startsWith('https://') ? url : null;
+      }
+      loginBtn?.addEventListener('click', async (e) => {
+        e.preventDefault();
+        if (readonly) return;
+        loginBtn.textContent = 'Checking...';
+        try {
+          // First check if OAuth URL is already visible
+          let r = await fetch('/api/capture?session=' + encodeURIComponent(sessionName));
+          if (!r.ok) throw new Error('capture failed');
+          let payload = await r.json();
+          let url = extractOAuthUrl(payload.text || '');
+          if (!url) {
+            // No URL yet — send /login and wait
+            if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('not connected');
+            loginBtn.textContent = 'Sending /login...';
+            ws.send('/login\\r');
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            r = await fetch('/api/capture?session=' + encodeURIComponent(sessionName));
+            if (!r.ok) throw new Error('capture failed');
+            payload = await r.json();
+            url = extractOAuthUrl(payload.text || '');
+          }
+          if (url) {
+            loginBtn.textContent = 'Opening...';
+            window.open(url, '_blank');
+            setTimeout(() => { loginBtn.textContent = 'Login'; }, 2000);
+          } else {
+            loginBtn.textContent = 'No URL found';
+            setTimeout(() => { loginBtn.textContent = 'Login'; }, 3000);
+          }
+        } catch {
+          loginBtn.textContent = 'Failed';
+          setTimeout(() => { loginBtn.textContent = 'Login'; }, 2000);
+        }
       });
 
       // Tap terminal to bring up keyboard (touch devices)

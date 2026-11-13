@@ -78,13 +78,13 @@ def test_send_retries_on_failure():
     import claudecode
     registry = {"testworker": {"tmux_name": "claude-test-testworker", "backend": "claude"}}
     with patch.object(bridge.worker_manager, "get_registered_sessions", return_value=registry), \
-         patch.object(claudecode.ClaudeBackend, "send", side_effect=[False, False, True]) as mock_send, \
+         patch.object(claudecode.ClaudeBackend, "send", side_effect=[False, False, False, True]) as mock_send, \
          patch("claudecode.tmux_exists", return_value=True), \
          patch("bridge.get_worker_host", return_value=None), \
          patch("time.sleep"):
         result = bridge.worker_manager.send("testworker", "hello")
         assert result is True
-        assert mock_send.call_count == 3
+        assert mock_send.call_count == 4
 
 
 def test_send_fails_after_max_retries():
@@ -99,7 +99,7 @@ def test_send_fails_after_max_retries():
          patch("time.sleep"):
         result = bridge.worker_manager.send("testworker", "hello")
         assert result is False
-        assert mock_send.call_count == 3
+        assert mock_send.call_count == 4
 
 
 def test_send_skips_retry_when_session_dead():
@@ -117,8 +117,8 @@ def test_send_skips_retry_when_session_dead():
         assert mock_send.call_count == 1
 
 
-def test_retry_uses_backoff():
-    """Retry delays should increase (backoff pattern)."""
+def test_retry_uses_exponential_backoff():
+    """Retry delays should follow exponential backoff (2^attempt)."""
     import bridge
     import claudecode
     sleep_calls = []
@@ -129,8 +129,8 @@ def test_retry_uses_backoff():
          patch("bridge.get_worker_host", return_value=None), \
          patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
         bridge.worker_manager.send("testworker", "hello")
-        assert len(sleep_calls) == 2  # 2 retries = 2 sleeps (not before first attempt)
-        assert sleep_calls[0] < sleep_calls[1], "Backoff should increase"
+        assert len(sleep_calls) == 3  # 3 retries = 3 sleeps (not before first attempt)
+        assert sleep_calls == [2.0, 4.0, 8.0], f"Expected exponential backoff 2^1,2^2,2^3 but got {sleep_calls}"
 
 
 def test_callback_worker_no_retry():
@@ -154,6 +154,23 @@ def test_codex_backend_no_retry():
         result = bridge.worker_manager.send("codexworker", "hello")
         assert result is True
         assert mock_send.call_count == 1
+
+
+def test_send_retries_on_timeout_exception():
+    """SSH timeout (SubprocessError) should be caught and retried, not crash."""
+    import subprocess
+    import bridge
+    import claudecode
+    registry = {"testworker": {"tmux_name": "claude-test-testworker", "backend": "claude"}}
+    timeout_exc = subprocess.TimeoutExpired(cmd=["ssh", "host", "tmux"], timeout=5)
+    with patch.object(bridge.worker_manager, "get_registered_sessions", return_value=registry), \
+         patch.object(claudecode.ClaudeBackend, "send", side_effect=[timeout_exc, timeout_exc, True]) as mock_send, \
+         patch("claudecode.tmux_exists", return_value=True), \
+         patch("bridge.get_worker_host", return_value="remote-host"), \
+         patch("time.sleep"):
+        result = bridge.worker_manager.send("testworker", "hello")
+        assert result is True
+        assert mock_send.call_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +259,7 @@ def test_send_logs_delivery_attempts(capsys):
          patch("time.sleep"):
         bridge.worker_manager.send("testworker", "hello")
     captured = capsys.readouterr()
-    assert "attempt 2/3" in captured.err, f"Should log retry attempt in stderr, got: {captured.err[:200]}"
+    assert "attempt 2/4" in captured.err, f"Should log retry attempt in stderr, got: {captured.err[:200]}"
 
 
 # ---------------------------------------------------------------------------

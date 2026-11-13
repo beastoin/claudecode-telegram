@@ -67,7 +67,6 @@ def test_worker_tier_includes_core_endpoints():
     assert "GET /workers" in worker_keys
     assert "GET /checkin" in worker_keys
     assert "POST /teleport" in worker_keys
-    assert "POST /messages" in worker_keys
     assert "GET /health" in worker_keys
 
 

@@ -229,62 +229,6 @@ class TestConnectorEndpoints:
         handler.send_response.assert_called_with(400)
 
 
-# ── POST /messages ────────────────────────────────────────
-
-
-class TestHandleSendEndpoint:
-    def test_send_missing_worker_returns_400(self):
-        import bridge
-        handler = _make_handler()
-        handler.handle_send_endpoint = bridge.Handler.handle_send_endpoint.__get__(handler, bridge.Handler)
-        body = json.dumps({"message": "hello"}).encode()
-        handler.handle_send_endpoint(body)
-        handler.send_response.assert_called_with(400)
-
-    def test_send_missing_message_returns_400(self):
-        import bridge
-        handler = _make_handler()
-        handler.handle_send_endpoint = bridge.Handler.handle_send_endpoint.__get__(handler, bridge.Handler)
-        body = json.dumps({"worker": "lee"}).encode()
-        handler.handle_send_endpoint(body)
-        handler.send_response.assert_called_with(400)
-
-    def test_send_delivers_to_worker(self):
-        import bridge
-        handler = _make_handler()
-        handler.handle_send_endpoint = bridge.Handler.handle_send_endpoint.__get__(handler, bridge.Handler)
-        with patch.object(bridge, "send_to_worker", return_value=True) as mock_send:
-            body = json.dumps({"worker": "lee", "message": "build the feature", "from": "manager"}).encode()
-            handler.handle_send_endpoint(body)
-        handler.send_response.assert_called_with(200)
-        mock_send.assert_called_once_with("lee", "manager: build the feature")
-
-    def test_send_worker_not_found_returns_404(self):
-        import bridge
-        handler = _make_handler()
-        handler.handle_send_endpoint = bridge.Handler.handle_send_endpoint.__get__(handler, bridge.Handler)
-        with patch.object(bridge, "send_to_worker", return_value=False):
-            body = json.dumps({"worker": "nonexistent", "message": "hello"}).encode()
-            handler.handle_send_endpoint(body)
-        handler.send_response.assert_called_with(404)
-
-    def test_send_uses_text_field_as_fallback(self):
-        import bridge
-        handler = _make_handler()
-        handler.handle_send_endpoint = bridge.Handler.handle_send_endpoint.__get__(handler, bridge.Handler)
-        with patch.object(bridge, "send_to_worker", return_value=True) as mock_send:
-            body = json.dumps({"worker": "lee", "text": "fallback text"}).encode()
-            handler.handle_send_endpoint(body)
-        mock_send.assert_called_once_with("lee", "system: fallback text")
-
-    def test_send_invalid_json_returns_400(self):
-        import bridge
-        handler = _make_handler()
-        handler.handle_send_endpoint = bridge.Handler.handle_send_endpoint.__get__(handler, bridge.Handler)
-        handler.handle_send_endpoint(b"not json")
-        handler.send_response.assert_called_with(400)
-
-
 # ── POST /outputs (hook response) ────────────────────────
 
 

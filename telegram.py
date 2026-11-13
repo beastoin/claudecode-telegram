@@ -169,6 +169,7 @@ BOT_COMMANDS = [
     {"command": "rewind", "description": "Transcript viewer: /rewind <name>"},
     {"command": "pr", "description": "PR review viewer: /pr <github_pr_url>"},
     {"command": "hire", "description": "Hire a worker: /hire <name>"},
+    {"command": "pause", "description": "Pause a worker: /pause <name>"},
     {"command": "end", "description": "Offboard a worker: /end <name>"},
 ]
 BLOCKED_COMMANDS = [

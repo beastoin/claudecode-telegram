@@ -6997,7 +6997,7 @@ test_response_endpoint_rejects_worker_misroute() {
     result=$(hook_curl "http://localhost:$PORT/outputs" \
         '{"session":"sui","source":"finn","text":"Hey sui, can you check this?"}')
 
-    if echo "$result" | grep -q "Source/session mismatch" && echo "$result" | grep -q "POST /messages"; then
+    if echo "$result" | grep -q "Source/session mismatch"; then
         success "/outputs rejects source/session mismatch"
     else
         fail "/outputs should reject source/session mismatch: $result"
@@ -7013,7 +7013,7 @@ test_response_endpoint_rejects_worker_misroute() {
 
     result=$(hook_curl "http://localhost:$PORT/outputs" \
         '{"session":"sui","text":"Hey sui"}')
-    if echo "$result" | grep -q "Missing source" && echo "$result" | grep -q "POST /messages"; then
+    if echo "$result" | grep -q "Missing source"; then
         success "/outputs rejects missing source"
     else
         fail "/outputs should reject missing source: $result"
@@ -18876,42 +18876,6 @@ test_known_endpoints_unchanged() {
     fi
 }
 
-test_send_endpoint_delivers_to_worker() {
-    info "Testing POST /messages delivers to a worker..."
-
-    send_message "/hire sendendpointtest" >/dev/null
-    wait_for_session "sendendpointtest"
-    sleep 0.3
-
-    local tmux_name="${TEST_TMUX_PREFIX}sendendpointtest"
-    local unique_msg="test_send_endpoint_${RANDOM}"
-    local body
-    body=$("$PYTHON" -c "import json; print(json.dumps({'worker':'sendendpointtest','message':'$unique_msg'}))")
-
-    local response
-    response=$(hook_curl "http://localhost:$PORT/messages" "$body")
-    if echo "$response" | "$PYTHON" -c "
-import sys, json
-d = json.load(sys.stdin)
-assert d.get('ok') is True, d
-assert d.get('worker') == 'sendendpointtest', d
-assert d.get('delivered') is True, d
-print('OK')
-" 2>/dev/null | grep -q "OK"; then
-        sleep 1
-        local pane_content
-        pane_content=$(tmux capture-pane -t "$tmux_name" -p 2>/dev/null || echo "")
-        if echo "$pane_content" | grep -q "$unique_msg"; then
-            success "POST /messages delivered message to tmux worker"
-        else
-            fail "POST /messages response was OK but message not found in tmux pane"
-        fi
-    else
-        fail "POST /messages should return delivery JSON: $response"
-    fi
-
-    send_message "/end sendendpointtest" >/dev/null 2>&1 || true
-}
 
 test_webhook_root_still_works() {
     info "Testing POST / (Telegram webhook) still works..."
@@ -22576,7 +22540,6 @@ run_integration_tests() {
     run_test test_unknown_get_returns_404
     run_test test_unknown_post_returns_404
     run_test test_known_endpoints_unchanged
-    run_test test_send_endpoint_delivers_to_worker
     run_test test_webhook_root_still_works
     run_test test_forge_register_endpoint
     # Admin tests

@@ -378,7 +378,7 @@ def _remote_run(cmd: list[str], host: str | None = None, **kwargs: object) -> su
         remote_cmd = " ".join(shlex.quote(str(a)) for a in cmd)
         _tv = kwargs.get("timeout", 10)
         timeout_val = int(_tv) if isinstance(_tv, (int, float, str)) else 10
-        cmd = ["ssh", "-o", f"ConnectTimeout={min(timeout_val, 5)}", host, remote_cmd]
+        cmd = ["ssh", "-o", f"ConnectTimeout={min(timeout_val, 8)}", host, remote_cmd]
     kwargs.setdefault("timeout", 10)
     kwargs.setdefault("capture_output", True)
     kwargs.setdefault("text", True)
